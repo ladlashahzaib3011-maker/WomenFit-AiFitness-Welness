@@ -1,0 +1,6 @@
+{
+  "name": "WomanFit",
+  "description": "Modern, professional women-focused fitness app with personalized workout plans, AI coach Maya, water intake tracker, healthy nutrition plans, and progress tracking.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
