@@ -2,6 +2,7 @@ package com.example.data
 
 import android.content.Context
 import com.example.data.local.AppDatabase
+import com.example.data.remote.WomenFitAiCloudClient
 import com.example.data.security.SessionDataStore
 
 /**
@@ -26,11 +27,22 @@ class AppContainer(context: Context) {
         )
     }
 
+    val cloudSync: FitnessCloudSync by lazy {
+        FitnessCloudSync(
+            database = database,
+            client = WomenFitAiCloudClient(sessionDataStore),
+            pendingGoalDeletes = FitnessCloudSync.PendingDeleteStore.Prefs(
+                appContext.getSharedPreferences("womenfit_ai_cloud_sync", Context.MODE_PRIVATE)
+            )
+        )
+    }
+
     val fitnessRepository: FitnessRepository by lazy {
         FitnessRepository(
             database = database,
             activeUserIdFlow = authRepository.activeUserId,
-            onProfileSync = authRepository::syncProfileUpdate
+            onProfileSync = authRepository::syncProfileUpdate,
+            cloudSync = cloudSync
         )
     }
 

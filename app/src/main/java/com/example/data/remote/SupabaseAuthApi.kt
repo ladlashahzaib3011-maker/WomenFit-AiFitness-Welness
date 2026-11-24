@@ -57,7 +57,7 @@ interface SupabaseAuthApi {
         @Body request: SupabaseRecoverRequest
     ): Response<Unit>
 
-    @GET("rest/v1/profiles")
+    @GET("rest/v1/womenfit_ai_users")
     suspend fun getUserProfile(
         @Header("apikey") apiKey: String,
         @Header("Authorization") authorization: String,
@@ -66,7 +66,7 @@ interface SupabaseAuthApi {
     ): Response<List<SupabaseProfileDto>>
 
     @Headers("Prefer: resolution=merge-duplicates,return=representation")
-    @POST("rest/v1/profiles")
+    @POST("rest/v1/womenfit_ai_users?on_conflict=id")
     suspend fun upsertUserProfile(
         @Header("apikey") apiKey: String,
         @Header("Authorization") authorization: String,

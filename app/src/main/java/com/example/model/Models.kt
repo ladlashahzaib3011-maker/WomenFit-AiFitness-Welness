@@ -99,7 +99,8 @@ data class LoggedMeal(
     val calories: Int,
     val protein: Int,
     val timestamp: Long = System.currentTimeMillis(),
-    val userId: String = "user_sarah_01"
+    val userId: String = "user_sarah_01",
+    val remoteId: String? = null
 )
 
 /**
@@ -121,7 +122,8 @@ data class DailyGoalItem(
     val title: String,
     val isCompleted: Boolean = false,
     val category: String = "Wellness",
-    val userId: String = "user_sarah_01"
+    val userId: String = "user_sarah_01",
+    val remoteId: String? = null
 )
 
 @Entity(tableName = "weight_logs")
@@ -132,7 +134,8 @@ data class WeightLogEntry(
     val waistCm: Float? = null,
     val hipsCm: Float? = null,
     val note: String = "",
-    val userId: String = "user_sarah_01"
+    val userId: String = "user_sarah_01",
+    val remoteId: String? = null
 )
 
 @Entity(tableName = "activity_history")
@@ -143,7 +146,8 @@ data class ActivityRecord(
     val caloriesBurned: Int,
     val category: String,
     val timestamp: Long = System.currentTimeMillis(),
-    val userId: String = "user_sarah_01"
+    val userId: String = "user_sarah_01",
+    val remoteId: String? = null
 )
 
 data class AchievementBadge(

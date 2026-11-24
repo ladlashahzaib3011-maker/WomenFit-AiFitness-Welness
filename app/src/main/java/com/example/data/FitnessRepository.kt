@@ -22,7 +22,9 @@ class FitnessRepository(
     private val activeUserIdFlow: StateFlow<String?> = MutableStateFlow(null),
     private val coachService: GeminiCoachService = GeminiCoachService(),
     private val scope: CoroutineScope = CoroutineScope(Dispatchers.IO),
-    private val onProfileSync: suspend (UserProfile) -> Unit = {}
+    private val onProfileSync: suspend (UserProfile) -> Unit = {},
+    /** Supabase womenfit_ai_* table sync. Null = local-only (e.g. unit tests). */
+    private val cloudSync: FitnessCloudSync? = null
 ) {
     private val userDao = database.userDao()
     private val progressDao = database.progressDao()
@@ -30,6 +32,32 @@ class FitnessRepository(
     private val weightLogDao = database.weightLogDao()
     private val activityRecordDao = database.activityRecordDao()
     private val loggedMealDao = database.loggedMealDao()
+
+    init {
+        // Whenever a user signs in (or the app starts with a saved session), do a full
+        // two-way sync with the Supabase womenfit_ai_* tables.
+        if (cloudSync != null) {
+            scope.launch {
+                // StateFlow only emits on change (sign-out emits null in between), so this
+                // runs once per sign-in, including signing back in to the same account.
+                activeUserIdFlow.collect { uid ->
+                    if (!uid.isNullOrBlank()) runCatching { cloudSync.syncAll(uid) }
+                }
+            }
+        }
+    }
+
+    /** Fire-and-forget upload; never blocks or crashes the UI if the network fails. */
+    private fun cloud(block: suspend FitnessCloudSync.() -> Unit) {
+        val sync = cloudSync ?: return
+        scope.launch {
+            try {
+                sync.block()
+            } catch (e: Exception) {
+                android.util.Log.w("FitnessRepository", "cloud push failed: ${e.javaClass.simpleName}")
+            }
+        }
+    }
 
     private val todayString: String
         get() = SimpleDateFormat("yyyy-MM-dd", Locale.getDefault()).format(Date())
@@ -91,6 +119,7 @@ class FitnessRepository(
             waterIntakeMl = (current.waterIntakeMl + amount).coerceAtLeast(0)
         )
         progressDao.saveDailyProgress(updated)
+        cloud { pushDailyProgress(uid, updated) }
     }
 
     suspend fun resetWater() {
@@ -98,7 +127,9 @@ class FitnessRepository(
         val userDateKey = "${uid}_$todayString"
         val current = progressDao.getDailyProgress(userDateKey).firstOrNull()
             ?: DailyProgress(date = userDateKey, streakDays = 1)
-        progressDao.saveDailyProgress(current.copy(waterIntakeMl = 0))
+        val updated = current.copy(date = userDateKey, waterIntakeMl = 0)
+        progressDao.saveDailyProgress(updated)
+        cloud { pushDailyProgress(uid, updated) }
     }
 
     // Goals - isolated per user ID
@@ -112,23 +143,29 @@ class FitnessRepository(
     }
 
     suspend fun toggleGoal(goal: DailyGoalItem) {
-        dailyGoalDao.updateGoal(goal.copy(isCompleted = !goal.isCompleted))
+        val updated = goal.copy(isCompleted = !goal.isCompleted)
+        dailyGoalDao.updateGoal(updated)
+        if (updated.remoteId != null) {
+            cloud { pushGoal(updated) }
+        }
     }
 
     suspend fun addGoal(title: String, category: String) {
         val uid = activeUserIdFlow.value ?: return
-        dailyGoalDao.insertGoal(
-            DailyGoalItem(
-                title = title,
-                isCompleted = false,
-                category = category,
-                userId = uid
-            )
+        val goal = DailyGoalItem(
+            title = title,
+            isCompleted = false,
+            category = category,
+            userId = uid,
+            remoteId = FitnessCloudSync.newRemoteId()
         )
+        dailyGoalDao.insertGoal(goal)
+        cloud { pushGoal(goal) }
     }
 
     suspend fun deleteGoal(goal: DailyGoalItem) {
         dailyGoalDao.deleteGoal(goal)
+        cloud { this.deleteGoal(goal) }
     }
 
     // Weight logs - isolated per user ID
@@ -144,16 +181,18 @@ class FitnessRepository(
     suspend fun logWeight(weight: Float, waist: Float?, hips: Float?, note: String) {
         val uid = activeUserIdFlow.value ?: return
         val dateLabel = SimpleDateFormat("MMM d", Locale.getDefault()).format(Date())
-        weightLogDao.insertLog(
-            WeightLogEntry(
-                dateString = dateLabel,
-                weightKg = weight,
-                waistCm = waist,
-                hipsCm = hips,
-                note = note,
-                userId = uid
-            )
+        val entry = WeightLogEntry(
+            dateString = dateLabel,
+            weightKg = weight,
+            waistCm = waist,
+            hipsCm = hips,
+            note = note,
+            userId = uid,
+            remoteId = FitnessCloudSync.newRemoteId()
         )
+        weightLogDao.insertLog(entry)
+        cloud { pushWeight(entry) }
+
         val currentProfile = userProfile.first()
         if (currentProfile.id.isNotBlank()) {
             val updatedProfile = currentProfile.copy(currentWeightKg = weight)
@@ -179,9 +218,11 @@ class FitnessRepository(
             durationMinutes = plan.durationMinutes,
             caloriesBurned = plan.estimatedCalories,
             category = plan.category.title,
-            userId = uid
+            userId = uid,
+            remoteId = FitnessCloudSync.newRemoteId()
         )
         activityRecordDao.insertRecord(record)
+        cloud { pushWorkout(record) }
 
         val userDateKey = "${uid}_$todayString"
         val current = progressDao.getDailyProgress(userDateKey).firstOrNull()
@@ -193,6 +234,7 @@ class FitnessRepository(
             completedWorkoutsCount = current.completedWorkoutsCount + 1
         )
         progressDao.saveDailyProgress(updated)
+        cloud { pushDailyProgress(uid, updated) }
     }
 
     // Logged Meals - isolated per user ID
@@ -207,15 +249,16 @@ class FitnessRepository(
 
     suspend fun logMeal(title: String, category: String, calories: Int, protein: Int) {
         val uid = activeUserIdFlow.value ?: return
-        loggedMealDao.insertMeal(
-            LoggedMeal(
-                title = title,
-                category = category,
-                calories = calories,
-                protein = protein,
-                userId = uid
-            )
+        val meal = LoggedMeal(
+            title = title,
+            category = category,
+            calories = calories,
+            protein = protein,
+            userId = uid,
+            remoteId = FitnessCloudSync.newRemoteId()
         )
+        loggedMealDao.insertMeal(meal)
+        cloud { pushMeal(meal) }
     }
 
     // Workouts catalog

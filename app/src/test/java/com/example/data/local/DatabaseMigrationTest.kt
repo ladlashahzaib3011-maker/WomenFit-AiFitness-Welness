@@ -321,4 +321,106 @@ class DatabaseMigrationTest {
 
         v3Db.close()
     }
+
+    @Test
+    fun `migration from version 4 to 5 adds nullable remoteId for cloud sync without data loss`() {
+        val context = ApplicationProvider.getApplicationContext<Context>()
+        val v4DbName = "migration_test_db_v4"
+        context.deleteDatabase(v4DbName)
+
+        val config = SupportSQLiteOpenHelper.Configuration.builder(context)
+            .name(v4DbName)
+            .callback(object : SupportSQLiteOpenHelper.Callback(4) {
+                override fun onCreate(db: SupportSQLiteDatabase) {
+                    db.execSQL(
+                        """
+                        CREATE TABLE IF NOT EXISTS `daily_goals` (
+                            `id` INTEGER PRIMARY KEY AUTOINCREMENT NOT NULL,
+                            `title` TEXT NOT NULL,
+                            `isCompleted` INTEGER NOT NULL,
+                            `category` TEXT NOT NULL,
+                            `userId` TEXT NOT NULL
+                        )
+                        """.trimIndent()
+                    )
+                    db.execSQL(
+                        """
+                        CREATE TABLE IF NOT EXISTS `weight_logs` (
+                            `id` INTEGER PRIMARY KEY AUTOINCREMENT NOT NULL,
+                            `dateString` TEXT NOT NULL,
+                            `weightKg` REAL NOT NULL,
+                            `waistCm` REAL,
+                            `hipsCm` REAL,
+                            `note` TEXT NOT NULL,
+                            `userId` TEXT NOT NULL
+                        )
+                        """.trimIndent()
+                    )
+                    db.execSQL(
+                        """
+                        CREATE TABLE IF NOT EXISTS `activity_history` (
+                            `id` INTEGER PRIMARY KEY AUTOINCREMENT NOT NULL,
+                            `workoutTitle` TEXT NOT NULL,
+                            `durationMinutes` INTEGER NOT NULL,
+                            `caloriesBurned` INTEGER NOT NULL,
+                            `category` TEXT NOT NULL,
+                            `timestamp` INTEGER NOT NULL,
+                            `userId` TEXT NOT NULL
+                        )
+                        """.trimIndent()
+                    )
+                    db.execSQL(
+                        """
+                        CREATE TABLE IF NOT EXISTS `logged_meals` (
+                            `id` INTEGER PRIMARY KEY AUTOINCREMENT NOT NULL,
+                            `title` TEXT NOT NULL,
+                            `category` TEXT NOT NULL,
+                            `calories` INTEGER NOT NULL,
+                            `protein` INTEGER NOT NULL,
+                            `timestamp` INTEGER NOT NULL,
+                            `userId` TEXT NOT NULL
+                        )
+                        """.trimIndent()
+                    )
+                }
+
+                override fun onUpgrade(db: SupportSQLiteDatabase, oldVersion: Int, newVersion: Int) {}
+            })
+            .build()
+
+        val helper = FrameworkSQLiteOpenHelperFactory().create(config)
+        val v4Db = helper.writableDatabase
+
+        val goalVal = ContentValues().apply {
+            put("title", "Stretch 10 min")
+            put("isCompleted", 0)
+            put("category", "Flexibility")
+            put("userId", "sb-user-1")
+        }
+        v4Db.insert("daily_goals", 0, goalVal)
+
+        AppDatabase.MIGRATION_4_5.migrate(v4Db)
+
+        listOf("daily_goals", "weight_logs", "activity_history", "logged_meals").forEach { table ->
+            val info = v4Db.query("PRAGMA table_info(`$table`)")
+            var hasRemoteId = false
+            val nameIdx = info.getColumnIndexOrThrow("name")
+            while (info.moveToNext()) {
+                if (info.getString(nameIdx) == "remoteId") {
+                    hasRemoteId = true
+                    break
+                }
+            }
+            info.close()
+            assertTrue("$table should have remoteId column after 4->5 migration", hasRemoteId)
+        }
+
+        val cursor = v4Db.query("SELECT * FROM daily_goals WHERE title = 'Stretch 10 min'")
+        assertTrue(cursor.moveToFirst())
+        assertEquals("sb-user-1", cursor.getString(cursor.getColumnIndexOrThrow("userId")))
+        assertTrue(cursor.isNull(cursor.getColumnIndexOrThrow("remoteId")))
+        cursor.close()
+
+        v4Db.close()
+    }
 }

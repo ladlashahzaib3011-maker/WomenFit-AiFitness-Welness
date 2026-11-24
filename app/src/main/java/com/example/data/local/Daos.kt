@@ -62,12 +62,18 @@ interface ProgressDao {
 
     @Query("UPDATE daily_progress SET waterIntakeMl = 0 WHERE date = :date")
     suspend fun resetWater(date: String)
+
+    @Query("SELECT * FROM daily_progress WHERE date LIKE :userKeyPrefix || '%'")
+    suspend fun getProgressForUserDirect(userKeyPrefix: String): List<DailyProgress>
 }
 
 @Dao
 interface DailyGoalDao {
     @Query("SELECT * FROM daily_goals WHERE userId = :userId ORDER BY id ASC")
     fun getGoalsByUserId(userId: String): Flow<List<DailyGoalItem>>
+
+    @Query("SELECT * FROM daily_goals WHERE userId = :userId ORDER BY id ASC")
+    suspend fun getGoalsByUserIdDirect(userId: String): List<DailyGoalItem>
 
     @Query("SELECT * FROM daily_goals ORDER BY id ASC")
     fun getAllGoals(): Flow<List<DailyGoalItem>>
@@ -96,8 +102,14 @@ interface WeightLogDao {
     @Query("SELECT * FROM weight_logs ORDER BY id DESC")
     fun getAllWeightLogs(): Flow<List<WeightLogEntry>>
 
+    @Query("SELECT * FROM weight_logs WHERE userId = :userId ORDER BY id ASC")
+    suspend fun getWeightLogsByUserIdDirect(userId: String): List<WeightLogEntry>
+
     @Insert(onConflict = OnConflictStrategy.REPLACE)
     suspend fun insertLog(entry: WeightLogEntry)
+
+    @Update
+    suspend fun updateLog(entry: WeightLogEntry)
 
     @Delete
     suspend fun deleteLog(entry: WeightLogEntry)
@@ -111,8 +123,14 @@ interface ActivityRecordDao {
     @Query("SELECT * FROM activity_history ORDER BY timestamp DESC")
     fun getAllRecords(): Flow<List<ActivityRecord>>
 
+    @Query("SELECT * FROM activity_history WHERE userId = :userId ORDER BY timestamp ASC")
+    suspend fun getRecordsByUserIdDirect(userId: String): List<ActivityRecord>
+
     @Insert(onConflict = OnConflictStrategy.REPLACE)
     suspend fun insertRecord(record: ActivityRecord)
+
+    @Update
+    suspend fun updateRecord(record: ActivityRecord)
 }
 
 @Dao
@@ -123,8 +141,14 @@ interface LoggedMealDao {
     @Query("SELECT * FROM logged_meals ORDER BY timestamp DESC")
     fun getAllLoggedMeals(): Flow<List<LoggedMeal>>
 
+    @Query("SELECT * FROM logged_meals WHERE userId = :userId ORDER BY timestamp ASC")
+    suspend fun getMealsByUserIdDirect(userId: String): List<LoggedMeal>
+
     @Insert(onConflict = OnConflictStrategy.REPLACE)
     suspend fun insertMeal(meal: LoggedMeal)
+
+    @Update
+    suspend fun updateMeal(meal: LoggedMeal)
 
     @Query("DELETE FROM logged_meals WHERE userId = :userId")
     suspend fun clearMealsByUserId(userId: String)

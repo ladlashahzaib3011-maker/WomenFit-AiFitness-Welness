@@ -14,7 +14,7 @@ import java.io.IOException
  * Production Supabase Authentication & PostgreSQL Profile Repository.
  *
  * - Authenticates strictly via Supabase Auth GoTrue REST API (/auth/v1).
- * - Syncs user profiles with Supabase PostgreSQL (/rest/v1/profiles) and caches locally in Room.
+ * - Syncs user profiles with Supabase PostgreSQL (/rest/v1/womenfit_ai_users) and caches locally in Room.
  * - Persists access tokens, refresh tokens, and expiration timestamps in Jetpack DataStore.
  * - Never stores plain-text passwords, never logs secrets/passwords, and never allows demo/fake login.
  */
@@ -485,6 +485,12 @@ class SupabaseAuthRepository(
                         }
                     )
                 )
+                return
+            }
+            if (response.isSuccessful) {
+                // Signed in but no womenfit_ai_users row yet (e.g. email-confirmed signup, or an
+                // account first created in the original WomenFit app on the same server): create it.
+                upsertRemoteAndLocalProfile(api, anonKey, session)
                 return
             }
         } catch (_: Exception) {
