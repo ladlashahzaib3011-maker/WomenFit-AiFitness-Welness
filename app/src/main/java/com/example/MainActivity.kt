@@ -6,11 +6,16 @@ import androidx.activity.compose.BackHandler
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
 import androidx.activity.viewModels
+import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.material3.Scaffold
 import androidx.compose.runtime.*
+import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.unit.dp
+import com.example.ui.components.CloudAlertHost
 import androidx.navigation.compose.NavHost
 import androidx.navigation.compose.composable
 import androidx.navigation.compose.navigation
@@ -63,122 +68,133 @@ fun WomanFitApp(
     val navController = rememberNavController()
     val sessionState by authViewModel.sessionState.collectAsState()
 
-    NavHost(
-        navController = navController,
-        startDestination = NavRoutes.SPLASH
-    ) {
-        // 1. Splash / Cold Launch Session Verification (Never renders Dashboard prior to check)
-        composable(NavRoutes.SPLASH) {
-            SplashScreen()
-
-            LaunchedEffect(sessionState) {
-                when (sessionState) {
-                    is SessionState.LoggedIn -> {
-                        navController.navigate(NavRoutes.MAIN_GRAPH) {
-                            popUpTo(NavRoutes.SPLASH) { inclusive = true }
-                            launchSingleTop = true
-                        }
-                    }
-                    is SessionState.LoggedOut -> {
-                        navController.navigate(NavRoutes.AUTH_GRAPH) {
-                            popUpTo(NavRoutes.SPLASH) { inclusive = true }
-                            launchSingleTop = true
-                        }
-                    }
-                    is SessionState.Loading -> {
-                        // Hold splash until DataStore & token verification finishes
-                    }
-                }
-            }
-        }
-
-        // 2. Authentication Graph (SignIn, SignUp, ForgotPassword)
-        navigation(
-            startDestination = NavRoutes.SIGN_IN,
-            route = NavRoutes.AUTH_GRAPH
+    Box(modifier = Modifier.fillMaxSize()) {
+        NavHost(
+            navController = navController,
+            startDestination = NavRoutes.SPLASH
         ) {
-            composable(NavRoutes.SIGN_IN) {
-                SignInScreen(
-                    authViewModel = authViewModel,
-                    onNavigateToSignUp = {
-                        navController.navigate(NavRoutes.SIGN_UP) {
-                            launchSingleTop = true
-                        }
-                    },
-                    onNavigateToForgotPassword = {
-                        navController.navigate(NavRoutes.FORGOT_PASSWORD) {
-                            launchSingleTop = true
-                        }
-                    },
-                    onSignInSuccess = {
-                        navController.navigate(NavRoutes.MAIN_GRAPH) {
-                            popUpTo(NavRoutes.AUTH_GRAPH) { inclusive = true }
-                            launchSingleTop = true
-                        }
-                    }
-                )
-            }
+            // 1. Splash / Cold Launch Session Verification (Never renders Dashboard prior to check)
+            composable(NavRoutes.SPLASH) {
+                SplashScreen()
 
-            composable(NavRoutes.SIGN_UP) {
-                SignUpScreen(
-                    authViewModel = authViewModel,
-                    onNavigateToSignIn = {
-                        navController.popBackStack()
-                    },
-                    onSignUpSuccess = {
-                        navController.navigate(NavRoutes.MAIN_GRAPH) {
-                            popUpTo(NavRoutes.AUTH_GRAPH) { inclusive = true }
-                            launchSingleTop = true
-                        }
-                    }
-                )
-            }
-
-            composable(NavRoutes.FORGOT_PASSWORD) {
-                ForgotPasswordScreen(
-                    authViewModel = authViewModel,
-                    onBackToSignIn = {
-                        navController.popBackStack()
-                    }
-                )
-            }
-        }
-
-        // 3. Main App Graph (Protected by Navigation Authentication Guard)
-        navigation(
-            startDestination = NavRoutes.HOME_CONTAINER,
-            route = NavRoutes.MAIN_GRAPH
-        ) {
-            composable(NavRoutes.HOME_CONTAINER) {
-                // Navigation Authentication Guard: Force redirect if session ever becomes unauthenticated
                 LaunchedEffect(sessionState) {
-                    if (sessionState is SessionState.LoggedOut) {
-                        fitnessViewModel.resetUiStateOnSignOut()
-                        navController.navigate(NavRoutes.AUTH_GRAPH) {
-                            popUpTo(NavRoutes.MAIN_GRAPH) { inclusive = true }
-                            launchSingleTop = true
+                    when (sessionState) {
+                        is SessionState.LoggedIn -> {
+                            navController.navigate(NavRoutes.MAIN_GRAPH) {
+                                popUpTo(NavRoutes.SPLASH) { inclusive = true }
+                                launchSingleTop = true
+                            }
+                        }
+                        is SessionState.LoggedOut -> {
+                            navController.navigate(NavRoutes.AUTH_GRAPH) {
+                                popUpTo(NavRoutes.SPLASH) { inclusive = true }
+                                launchSingleTop = true
+                            }
+                        }
+                        is SessionState.Loading -> {
+                            // Hold splash until DataStore & token verification finishes
                         }
                     }
                 }
+            }
 
-                if (sessionState is SessionState.LoggedIn) {
-                    MainContainerScreen(
-                        viewModel = fitnessViewModel,
-                        onSignOutConfirmed = {
-                            authViewModel.signOut {
-                                fitnessViewModel.resetUiStateOnSignOut()
-                                navController.navigate(NavRoutes.AUTH_GRAPH) {
-                                    popUpTo(NavRoutes.MAIN_GRAPH) { inclusive = true }
-                                    launchSingleTop = true
-                                }
+            // 2. Authentication Graph (SignIn, SignUp, ForgotPassword)
+            navigation(
+                startDestination = NavRoutes.SIGN_IN,
+                route = NavRoutes.AUTH_GRAPH
+            ) {
+                composable(NavRoutes.SIGN_IN) {
+                    SignInScreen(
+                        authViewModel = authViewModel,
+                        onNavigateToSignUp = {
+                            navController.navigate(NavRoutes.SIGN_UP) {
+                                launchSingleTop = true
+                            }
+                        },
+                        onNavigateToForgotPassword = {
+                            navController.navigate(NavRoutes.FORGOT_PASSWORD) {
+                                launchSingleTop = true
+                            }
+                        },
+                        onSignInSuccess = {
+                            navController.navigate(NavRoutes.MAIN_GRAPH) {
+                                popUpTo(NavRoutes.AUTH_GRAPH) { inclusive = true }
+                                launchSingleTop = true
                             }
                         }
                     )
-                } else {
-                    SplashScreen()
+                }
+
+                composable(NavRoutes.SIGN_UP) {
+                    SignUpScreen(
+                        authViewModel = authViewModel,
+                        onNavigateToSignIn = {
+                            navController.popBackStack()
+                        },
+                        onSignUpSuccess = {
+                            navController.navigate(NavRoutes.MAIN_GRAPH) {
+                                popUpTo(NavRoutes.AUTH_GRAPH) { inclusive = true }
+                                launchSingleTop = true
+                            }
+                        }
+                    )
+                }
+
+                composable(NavRoutes.FORGOT_PASSWORD) {
+                    ForgotPasswordScreen(
+                        authViewModel = authViewModel,
+                        onBackToSignIn = {
+                            navController.popBackStack()
+                        }
+                    )
+                }
+            }
+
+            // 3. Main App Graph (Protected by Navigation Authentication Guard)
+            navigation(
+                startDestination = NavRoutes.HOME_CONTAINER,
+                route = NavRoutes.MAIN_GRAPH
+            ) {
+                composable(NavRoutes.HOME_CONTAINER) {
+                    // Navigation Authentication Guard: Force redirect if session ever becomes unauthenticated
+                    LaunchedEffect(sessionState) {
+                        if (sessionState is SessionState.LoggedOut) {
+                            fitnessViewModel.resetUiStateOnSignOut()
+                            navController.navigate(NavRoutes.AUTH_GRAPH) {
+                                popUpTo(NavRoutes.MAIN_GRAPH) { inclusive = true }
+                                launchSingleTop = true
+                            }
+                        }
+                    }
+
+                    if (sessionState is SessionState.LoggedIn) {
+                        MainContainerScreen(
+                            viewModel = fitnessViewModel,
+                            onSignOutConfirmed = {
+                                authViewModel.signOut {
+                                    fitnessViewModel.resetUiStateOnSignOut()
+                                    navController.navigate(NavRoutes.AUTH_GRAPH) {
+                                        popUpTo(NavRoutes.MAIN_GRAPH) { inclusive = true }
+                                        launchSingleTop = true
+                                    }
+                                }
+                            }
+                        )
+                    } else {
+                        SplashScreen()
+                    }
                 }
             }
         }
+
+        // App-wide alerts after every save / sync ("💧 Water +250 ml — saved to cloud ✓"),
+        // shown above the bottom navigation bar on every screen.
+        CloudAlertHost(
+            modifier = Modifier
+                .align(Alignment.BottomCenter)
+                .navigationBarsPadding()
+                .padding(bottom = 84.dp)
+        )
     }
 }
 

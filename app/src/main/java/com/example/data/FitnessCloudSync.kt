@@ -83,37 +83,45 @@ class FitnessCloudSync(
     // Single-item pushes (called right after each local write)
     // -------------------------------------------------------------
 
-    suspend fun pushDailyProgress(userId: String, progress: DailyProgress) {
-        val row = progressToJson(userId, progress) ?: return
-        client.upsertRows(TABLE_DAILY_PROGRESS, JSONArray().put(row), onConflict = "user_id,log_date")
+    // Each push returns true when the row was saved in Supabase (false = kept on phone only,
+    // it will be uploaded by the next syncAll). Used for the "saved to cloud" alerts.
+
+    suspend fun pushDailyProgress(userId: String, progress: DailyProgress): Boolean {
+        val row = progressToJson(userId, progress) ?: return false
+        return client.upsertRows(TABLE_DAILY_PROGRESS, JSONArray().put(row), onConflict = "user_id,log_date")
     }
 
-    suspend fun pushWorkout(record: ActivityRecord) {
-        val row = workoutToJson(record) ?: return
-        client.upsertRows(TABLE_WORKOUT_LOGS, JSONArray().put(row))
+    suspend fun pushWorkout(record: ActivityRecord): Boolean {
+        val row = workoutToJson(record) ?: return false
+        return client.upsertRows(TABLE_WORKOUT_LOGS, JSONArray().put(row))
     }
 
-    suspend fun pushWeight(entry: WeightLogEntry) {
-        val row = weightToJson(entry) ?: return
-        client.upsertRows(TABLE_WEIGHT_LOGS, JSONArray().put(row))
+    suspend fun pushWeight(entry: WeightLogEntry): Boolean {
+        val row = weightToJson(entry) ?: return false
+        return client.upsertRows(TABLE_WEIGHT_LOGS, JSONArray().put(row))
     }
 
-    suspend fun pushMeal(meal: LoggedMeal) {
-        val row = mealToJson(meal) ?: return
-        client.upsertRows(TABLE_MEAL_LOGS, JSONArray().put(row))
+    suspend fun pushMeal(meal: LoggedMeal): Boolean {
+        val row = mealToJson(meal) ?: return false
+        return client.upsertRows(TABLE_MEAL_LOGS, JSONArray().put(row))
     }
 
-    suspend fun pushGoal(goal: DailyGoalItem) {
-        val row = goalToJson(goal) ?: return
-        client.upsertRows(TABLE_DAILY_GOALS, JSONArray().put(row))
+    suspend fun pushGoal(goal: DailyGoalItem): Boolean {
+        val row = goalToJson(goal) ?: return false
+        return client.upsertRows(TABLE_DAILY_GOALS, JSONArray().put(row))
     }
 
-    suspend fun deleteGoal(goal: DailyGoalItem) {
-        val id = goal.remoteId ?: return
+    suspend fun deleteGoal(goal: DailyGoalItem): Boolean {
+        val id = goal.remoteId ?: return false
         // Remember it first so an offline delete is retried (and never re-downloaded) later.
         pendingGoalDeletes.add(id)
-        if (markGoalDeleted(id)) pendingGoalDeletes.remove(id)
+        val ok = markGoalDeleted(id)
+        if (ok) pendingGoalDeletes.remove(id)
+        return ok
     }
+
+    /** Pings the server and updates [CloudStatus.connection] (for the status badge). */
+    suspend fun checkConnection(): CloudConnection = client.checkConnection()
 
     /** Soft-delete on the server (is_deleted = true) so every phone drops the goal. */
     private suspend fun markGoalDeleted(id: String): Boolean =
@@ -123,9 +131,14 @@ class FitnessCloudSync(
     // Full two-way sync
     // -------------------------------------------------------------
 
-    suspend fun syncAll(userId: String) {
-        if (userId.isBlank() || !client.isConfigured()) return
-        syncMutex.withLock {
+    /** Returns true when the sync finished while the server was reachable. */
+    suspend fun syncAll(userId: String): Boolean {
+        if (userId.isBlank()) return false
+        if (!client.isConfigured()) {
+            CloudStatus.setConnection(CloudConnection.NOT_CONFIGURED)
+            return false
+        }
+        return syncMutex.withLock {
             try {
                 syncDailyProgress(userId)
                 syncWorkouts(userId)
@@ -133,8 +146,10 @@ class FitnessCloudSync(
                 syncMeals(userId)
                 syncGoals(userId)
                 Log.i(TAG, "Cloud sync finished")
+                CloudStatus.connection.value == CloudConnection.ONLINE
             } catch (e: Exception) {
                 Log.w(TAG, "Cloud sync stopped early: ${e.javaClass.simpleName}: ${e.message}")
+                false
             }
         }
     }

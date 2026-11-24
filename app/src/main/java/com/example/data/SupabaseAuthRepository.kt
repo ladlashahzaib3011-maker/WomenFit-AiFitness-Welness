@@ -359,15 +359,15 @@ class SupabaseAuthRepository(
         }
     }
 
-    override suspend fun syncProfileUpdate(userProfile: UserProfile) {
-        val session = sessionDataStore.getSession() ?: return
-        if (session.userId != userProfile.id) return
-        val api = apiProvider() ?: return
+    override suspend fun syncProfileUpdate(userProfile: UserProfile): Boolean {
+        val session = sessionDataStore.getSession() ?: return false
+        if (session.userId != userProfile.id) return false
+        val api = apiProvider() ?: return false
         val anonKey = anonKeyProvider()
-        if (anonKey.isBlank() || anonKey == "DEFAULT_EMPTY") return
+        if (anonKey.isBlank() || anonKey == "DEFAULT_EMPTY") return false
 
-        try {
-            api.upsertUserProfile(
+        return try {
+            val response = api.upsertUserProfile(
                 apiKey = anonKey,
                 authorization = "Bearer ${session.accessToken}",
                 profile = SupabaseProfileDto(
@@ -385,8 +385,14 @@ class SupabaseAuthRepository(
                     lastPeriodStartTimestamp = userProfile.lastPeriodStartTimestamp
                 )
             )
+            CloudStatus.setConnection(CloudConnection.ONLINE)
+            response.isSuccessful
+        } catch (_: IOException) {
+            // No connection: keep local Room state authoritative until backend sync succeeds
+            CloudStatus.setConnection(CloudConnection.OFFLINE)
+            false
         } catch (_: Exception) {
-            // Keep local Room state authoritative offline until backend sync succeeds
+            false
         }
     }
 

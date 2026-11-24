@@ -134,3 +134,13 @@ tables return 404 and the app keeps data locally only (it does not crash).
 - The first app has an `auth.users` trigger that creates a row in its own `profiles` table for every
   new account, including accounts made in this app. This is harmless.
 - Coach Maya chat history is still in memory only (not saved to Supabase).
+
+---
+
+## 7. Cloud sync status & alerts
+
+- **`data/CloudStatus.kt`** – App-wide `connection: StateFlow<CloudConnection>` (`CHECKING`, `ONLINE`, `OFFLINE`, `NOT_CONFIGURED`) and `alerts: SharedFlow<CloudAlert>`.
+- **`ui/components/CloudSyncUi.kt`** –
+  - `CloudSyncBadge()` on `SignInScreen`, `SignUpScreen`, and `ProfileScreen` pings `GET /auth/v1/health` on the Supabase server when shown and every 30 s: green pulsing dot `"Cloud sync active"` when reachable, amber `"Offline mode – saving on phone"` when unreachable.
+  - `CloudAlertHost()` is mounted in `MainActivity` over the `NavHost` (above the bottom navigation bar) and displays a snackbar (latest alert replaces previous) after every save or sign-in sync (e.g. `"💧 Water +250 ml — saved to cloud ✓"`, `"📱 Offline — your data is safe on this phone and will sync later"`, `"☁️ Cloud sync complete — your data is up to date"`).
+- **`WomenFitAiCloudClient` / `FitnessCloudSync` / `FitnessRepository` / `SupabaseAuthRepository`** – All network calls update `CloudStatus.connection`, push/sync functions return `Boolean`, and every save reports the cloud/offline result via `CloudStatus.reportSave(...)`.

@@ -37,6 +37,7 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.example.data.AuthField
 import com.example.ui.AuthViewModel
+import com.example.ui.components.CloudSyncBadge
 import com.example.ui.theme.*
 
 /**
@@ -151,7 +152,12 @@ fun SignInScreen(
                     textAlign = TextAlign.Center
                 )
 
-                Spacer(modifier = Modifier.height(24.dp))
+                Spacer(modifier = Modifier.height(14.dp))
+
+                // Live Supabase connection indicator ("● Cloud sync active")
+                CloudSyncBadge()
+
+                Spacer(modifier = Modifier.height(20.dp))
 
                 // Side-by-Side Mode Switcher: Sign In | Sign Up
                 AuthModeSwitcher(

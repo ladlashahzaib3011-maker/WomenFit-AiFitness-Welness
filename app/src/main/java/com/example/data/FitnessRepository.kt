@@ -22,7 +22,8 @@ class FitnessRepository(
     private val activeUserIdFlow: StateFlow<String?> = MutableStateFlow(null),
     private val coachService: GeminiCoachService = GeminiCoachService(),
     private val scope: CoroutineScope = CoroutineScope(Dispatchers.IO),
-    private val onProfileSync: suspend (UserProfile) -> Unit = {},
+    /** Saves the profile to Supabase; returns true when it reached the cloud. */
+    private val onProfileSync: suspend (UserProfile) -> Boolean = { false },
     /** Supabase womenfit_ai_* table sync. Null = local-only (e.g. unit tests). */
     private val cloudSync: FitnessCloudSync? = null
 ) {
@@ -41,21 +42,33 @@ class FitnessRepository(
                 // StateFlow only emits on change (sign-out emits null in between), so this
                 // runs once per sign-in, including signing back in to the same account.
                 activeUserIdFlow.collect { uid ->
-                    if (!uid.isNullOrBlank()) runCatching { cloudSync.syncAll(uid) }
+                    if (!uid.isNullOrBlank()) {
+                        val ok = runCatching { cloudSync.syncAll(uid) }.getOrDefault(false)
+                        if (ok) {
+                            CloudStatus.alert("☁️ Cloud sync complete — your data is up to date", isSuccess = true)
+                        } else if (CloudStatus.connection.value != CloudConnection.NOT_CONFIGURED) {
+                            CloudStatus.alert("📱 Offline — your data is safe on this phone and will sync later", isSuccess = false)
+                        }
+                    }
                 }
             }
         }
     }
 
-    /** Fire-and-forget upload; never blocks or crashes the UI if the network fails. */
-    private fun cloud(block: suspend FitnessCloudSync.() -> Unit) {
+    /**
+     * Fire-and-forget upload; never blocks or crashes the UI if the network fails.
+     * When [alertLabel] is set, shows "<label> — saved to cloud ✓" (or the offline variant).
+     */
+    private fun cloud(alertLabel: String? = null, block: suspend FitnessCloudSync.() -> Boolean) {
         val sync = cloudSync ?: return
         scope.launch {
-            try {
+            val ok = try {
                 sync.block()
             } catch (e: Exception) {
                 android.util.Log.w("FitnessRepository", "cloud push failed: ${e.javaClass.simpleName}")
+                false
             }
+            if (alertLabel != null) CloudStatus.reportSave(alertLabel, ok)
         }
     }
 
@@ -93,7 +106,8 @@ class FitnessRepository(
         val targetId = activeUserIdFlow.value ?: return
         val updated = user.copy(id = targetId)
         userDao.insertOrUpdate(updated)
-        onProfileSync(updated)
+        val savedToCloud = runCatching { onProfileSync(updated) }.getOrDefault(false)
+        CloudStatus.reportSave("👤 Profile", savedToCloud)
     }
 
     // Progress - isolated per user ID
@@ -119,7 +133,8 @@ class FitnessRepository(
             waterIntakeMl = (current.waterIntakeMl + amount).coerceAtLeast(0)
         )
         progressDao.saveDailyProgress(updated)
-        cloud { pushDailyProgress(uid, updated) }
+        val label = if (amount >= 0) "💧 Water +$amount ml" else "💧 Water ${amount} ml"
+        cloud(label) { pushDailyProgress(uid, updated) }
     }
 
     suspend fun resetWater() {
@@ -129,7 +144,7 @@ class FitnessRepository(
             ?: DailyProgress(date = userDateKey, streakDays = 1)
         val updated = current.copy(date = userDateKey, waterIntakeMl = 0)
         progressDao.saveDailyProgress(updated)
-        cloud { pushDailyProgress(uid, updated) }
+        cloud("💧 Water reset") { pushDailyProgress(uid, updated) }
     }
 
     // Goals - isolated per user ID
@@ -146,7 +161,8 @@ class FitnessRepository(
         val updated = goal.copy(isCompleted = !goal.isCompleted)
         dailyGoalDao.updateGoal(updated)
         if (updated.remoteId != null) {
-            cloud { pushGoal(updated) }
+            val label = if (updated.isCompleted) "✅ Goal completed" else "↩️ Goal marked not done"
+            cloud(label) { pushGoal(updated) }
         }
     }
 
@@ -160,12 +176,14 @@ class FitnessRepository(
             remoteId = FitnessCloudSync.newRemoteId()
         )
         dailyGoalDao.insertGoal(goal)
-        cloud { pushGoal(goal) }
+        cloud("🎯 Goal \"$title\" added") { pushGoal(goal) }
     }
 
     suspend fun deleteGoal(goal: DailyGoalItem) {
         dailyGoalDao.deleteGoal(goal)
-        cloud { this.deleteGoal(goal) }
+        if (goal.remoteId != null) {
+            cloud("🗑️ Goal deleted") { this.deleteGoal(goal) } // `this` = FitnessCloudSync
+        }
     }
 
     // Weight logs - isolated per user ID
@@ -191,7 +209,7 @@ class FitnessRepository(
             remoteId = FitnessCloudSync.newRemoteId()
         )
         weightLogDao.insertLog(entry)
-        cloud { pushWeight(entry) }
+        cloud("⚖️ Weight ${"%.1f".format(Locale.US, weight)} kg") { pushWeight(entry) }
 
         val currentProfile = userProfile.first()
         if (currentProfile.id.isNotBlank()) {
@@ -222,7 +240,7 @@ class FitnessRepository(
             remoteId = FitnessCloudSync.newRemoteId()
         )
         activityRecordDao.insertRecord(record)
-        cloud { pushWorkout(record) }
+        cloud("🏋️ Workout \"${plan.title}\"") { pushWorkout(record) }
 
         val userDateKey = "${uid}_$todayString"
         val current = progressDao.getDailyProgress(userDateKey).firstOrNull()
@@ -258,7 +276,7 @@ class FitnessRepository(
             remoteId = FitnessCloudSync.newRemoteId()
         )
         loggedMealDao.insertMeal(meal)
-        cloud { pushMeal(meal) }
+        cloud("🥗 Meal \"$title\"") { pushMeal(meal) }
     }
 
     // Workouts catalog

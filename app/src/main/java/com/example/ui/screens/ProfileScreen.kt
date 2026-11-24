@@ -22,6 +22,7 @@ import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.example.ui.FitnessViewModel
+import com.example.ui.components.CloudSyncBadge
 import com.example.ui.theme.*
 
 @Composable
@@ -114,6 +115,11 @@ fun ProfileScreen(
                             modifier = Modifier.padding(horizontal = 12.dp, vertical = 5.dp)
                         )
                     }
+
+                    Spacer(modifier = Modifier.height(10.dp))
+
+                    // Live Supabase connection indicator ("● Cloud sync active")
+                    CloudSyncBadge()
 
                     Spacer(modifier = Modifier.height(14.dp))
 

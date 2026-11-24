@@ -66,7 +66,8 @@ interface AuthRepository {
 
     suspend fun requestPasswordReset(emailInput: String): ResetRequestResult
 
-    suspend fun syncProfileUpdate(userProfile: UserProfile)
+    /** Saves the profile to Supabase (womenfit_ai_users). Returns true when it reached the cloud. */
+    suspend fun syncProfileUpdate(userProfile: UserProfile): Boolean
 
     suspend fun signOut()
 }

@@ -1,0 +1,1713 @@
+INSTRUCTIONS FOR AI STUDIO - CLOUD SYNC STATUS BADGE + SAVE ALERTS
+This update is built on top of commit cdcfeb9 feat: implement cloud data synchronization (your latest push). Keep everything from AI_STUDIO_HANDOFF.md working (womenfit_ai_* tables, Supabase settings, Room v5 migration).
+
+What this update does
+Live "Cloud sync active" badge (like the original WomenFit app) on the Sign In, Sign Up and Profile screens. It pings GET /auth/v1/health on the Supabase server when shown and every 30 s: green dot "Cloud sync active" when reachable, amber "Offline mode – saving on phone" when not.
+An alert (snackbar) after every action so the user knows what happened, e.g. "💧 Water +250 ml — saved to cloud ✓" or "… — saved on phone, will sync when online". Covers water add/reset, goal add/complete/delete, weight, workout, meal, profile edit, and the full sync after sign-in ("☁️ Cloud sync complete — your data is up to date").
+How it works
+New data/CloudStatus.kt: app-wide connection: StateFlow<CloudConnection> and alerts: SharedFlow<CloudAlert>.
+WomenFitAiCloudClient sets ONLINE/OFFLINE after every request and has checkConnection().
+FitnessCloudSync push functions now return Boolean (true = saved in Supabase); syncAll returns Boolean.
+FitnessRepository.cloud(alertLabel) { ... } shows the alert with the push result.
+AuthRepository.syncProfileUpdate now returns Boolean so the profile alert is accurate.
+New ui/components/CloudSyncUi.kt: CloudSyncBadge() and CloudAlertHost(). MainActivity wraps the NavHost in a Box and shows CloudAlertHost at the bottom (above the bottom navigation) on every screen.
+Please do exactly this
+Create the 2 NEW files and REPLACE the 5 files in Part 1 with the code given (they are based on your current version, only the cloud-status parts changed). Part 1 also has one SMALL EDIT for SupabaseAuthRepository.
+Apply the 3 SMALL EDITS in Part 2 (insert the badge; nothing else changes in those screens).
+Add a short section "Cloud sync status & alerts" to AI_STUDIO_HANDOFF.md describing the points above.
+Build and run the unit tests. Fix compile errors with the smallest change, without changing the behaviour above.
+Reply with the changed files, the build result and the test result.
+PART 1 - NEW AND REPLACED FILES
+FILE: app/src/main/java/com/example/data/CloudStatus.kt
+NEW - app-wide cloud connection state + alerts
+
+package com.example.data
+
+import kotlinx.coroutines.channels.BufferOverflow
+import kotlinx.coroutines.flow.MutableSharedFlow
+import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.SharedFlow
+import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.asSharedFlow
+import kotlinx.coroutines.flow.asStateFlow
+
+/** Live connection state to the WomenFit Supabase server (womenfit-api.marketsync.cloud). */
+enum class CloudConnection {
+    /** First check not finished yet. */
+    CHECKING,
+    /** Server answered: data is being saved to the cloud. */
+    ONLINE,
+    /** No internet / server unreachable: data is saved on the phone and synced later. */
+    OFFLINE,
+    /** SUPABASE_URL / SUPABASE_ANON_KEY missing in the build. */
+    NOT_CONFIGURED
+}
+
+/** One alert shown to the user after an action (snackbar at the bottom of the screen). */
+data class CloudAlert(
+    val message: String,
+    val isSuccess: Boolean,
+    val id: Long = System.nanoTime()
+)
+
+/**
+ * App-wide cloud sync status + user alerts.
+ *
+ * - [connection] drives the "Cloud sync active" badge on the auth and profile screens.
+ * - [alerts] drives the snackbar shown after every save (water, workout, meal, weight,
+ *   goal, profile) and after the sign-in sync.
+ *
+ * Updated by WomenFitAiCloudClient (every network call), SupabaseAuthRepository (profile)
+ * and FitnessRepository (each save).
+ */
+object CloudStatus {
+    private val _connection = MutableStateFlow(CloudConnection.CHECKING)
+    val connection: StateFlow<CloudConnection> = _connection.asStateFlow()
+
+    private val _alerts = MutableSharedFlow<CloudAlert>(
+        extraBufferCapacity = 16,
+        onBufferOverflow = BufferOverflow.DROP_OLDEST
+    )
+    val alerts: SharedFlow<CloudAlert> = _alerts.asSharedFlow()
+
+    fun setConnection(state: CloudConnection) {
+        _connection.value = state
+    }
+
+    fun alert(message: String, isSuccess: Boolean) {
+        _alerts.tryEmit(CloudAlert(message = message, isSuccess = isSuccess))
+    }
+
+    /** Standard alert after saving something: "<what> — saved to cloud ✓" or the offline variant. */
+    fun reportSave(what: String, savedToCloud: Boolean) {
+        if (savedToCloud) {
+            alert("$what — saved to cloud ✓", isSuccess = true)
+        } else {
+            alert("$what — saved on phone, will sync when online", isSuccess = false)
+        }
+    }
+}
+FILE: app/src/main/java/com/example/ui/components/CloudSyncUi.kt
+NEW - CloudSyncBadge + CloudAlertHost composables
+
+package com.example.ui.components
+
+import androidx.compose.animation.core.RepeatMode
+import androidx.compose.animation.core.animateFloat
+import androidx.compose.animation.core.infiniteRepeatable
+import androidx.compose.animation.core.rememberInfiniteTransition
+import androidx.compose.animation.core.tween
+import androidx.compose.foundation.background
+import androidx.compose.foundation.border
+import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.shape.CircleShape
+import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.Snackbar
+import androidx.compose.material3.SnackbarData
+import androidx.compose.material3.SnackbarDuration
+import androidx.compose.material3.SnackbarHost
+import androidx.compose.material3.SnackbarHostState
+import androidx.compose.material3.SnackbarVisuals
+import androidx.compose.material3.Text
+import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.collectAsState
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.ui.Alignment
+import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.alpha
+import androidx.compose.ui.draw.clip
+import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.testTag
+import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.unit.dp
+import com.example.data.AppContainer
+import com.example.data.CloudConnection
+import com.example.data.CloudStatus
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.launch
+
+private val OnlineGreen = Color(0xFF22C55E)
+private val OfflineAmber = Color(0xFFF59E0B)
+private val NeutralGrey = Color(0xFF94A3B8)
+
+/**
+ * "● Cloud sync active" pill (same idea as the original WomenFit app), but live:
+ * it pings the Supabase server when shown and every 30 seconds while visible.
+ *
+ *  - green  "Cloud sync active"                 → server reachable, saves go to the cloud
+ *  - amber  "Offline mode – saving on phone"    → no connection, data syncs later
+ *  - grey   "Connecting to cloud…"              → first check running
+ */
+@Composable
+fun CloudSyncBadge(modifier: Modifier = Modifier) {
+    val context = LocalContext.current
+    val connection by CloudStatus.connection.collectAsState()
+
+    LaunchedEffect(Unit) {
+        val sync = AppContainer.getInstance(context).cloudSync
+        while (true) {
+            runCatching { sync.checkConnection() }
+            delay(30_000)
+        }
+    }
+
+    val (dotColor, label) = when (connection) {
+        CloudConnection.ONLINE -> OnlineGreen to "Cloud sync active"
+        CloudConnection.OFFLINE -> OfflineAmber to "Offline mode – saving on phone"
+        CloudConnection.NOT_CONFIGURED -> NeutralGrey to "Cloud not configured"
+        CloudConnection.CHECKING -> NeutralGrey to "Connecting to cloud…"
+    }
+
+    // Soft pulse on the dot while online, like a live indicator.
+    val pulse = rememberInfiniteTransition(label = "cloudPulse")
+    val dotAlpha by pulse.animateFloat(
+        initialValue = 1f,
+        targetValue = if (connection == CloudConnection.ONLINE) 0.45f else 1f,
+        animationSpec = infiniteRepeatable(tween(900), RepeatMode.Reverse),
+        label = "cloudDotAlpha"
+    )
+
+    Row(
+        modifier = modifier
+            .testTag("cloud_sync_badge")
+            .clip(RoundedCornerShape(50))
+            .background(Color.White.copy(alpha = 0.85f))
+            .border(1.dp, Color(0xFFE9D5E3), RoundedCornerShape(50))
+            .padding(horizontal = 14.dp, vertical = 7.dp),
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.Center
+    ) {
+        Box(
+            modifier = Modifier
+                .size(8.dp)
+                .alpha(dotAlpha)
+                .clip(CircleShape)
+                .background(dotColor)
+        )
+        Spacer(modifier = Modifier.width(8.dp))
+        Text(
+            text = label,
+            style = MaterialTheme.typography.labelMedium,
+            color = Color(0xFF475569),
+            fontWeight = FontWeight.SemiBold
+        )
+    }
+}
+
+private class CloudAlertVisuals(
+    override val message: String,
+    val isSuccess: Boolean
+) : SnackbarVisuals {
+    override val actionLabel: String? = null
+    override val withDismissAction: Boolean = false
+    override val duration: SnackbarDuration = SnackbarDuration.Short
+}
+
+/**
+ * Shows every [CloudStatus.alerts] message as a snackbar ("💧 Water +250 ml — saved to cloud ✓").
+ * Place once at the bottom of the app, above the bottom navigation bar.
+ */
+@Composable
+fun CloudAlertHost(modifier: Modifier = Modifier) {
+    val hostState = remember { SnackbarHostState() }
+    val scope = rememberCoroutineScope()
+
+    LaunchedEffect(Unit) {
+        CloudStatus.alerts.collect { alert ->
+            // Newest alert replaces the one on screen instead of waiting in a queue.
+            hostState.currentSnackbarData?.dismiss()
+            scope.launch { hostState.showSnackbar(CloudAlertVisuals(alert.message, alert.isSuccess)) }
+        }
+    }
+
+    SnackbarHost(
+        hostState = hostState,
+        modifier = modifier.testTag("cloud_alert_host")
+    ) { data: SnackbarData ->
+        val success = (data.visuals as? CloudAlertVisuals)?.isSuccess ?: true
+        Snackbar(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(horizontal = 16.dp),
+            shape = RoundedCornerShape(14.dp),
+            containerColor = if (success) Color(0xFF0F766E) else Color(0xFFB45309),
+            contentColor = Color.White
+        ) {
+            Text(
+                text = data.visuals.message,
+                style = MaterialTheme.typography.bodyMedium,
+                fontWeight = FontWeight.Medium
+            )
+        }
+    }
+}
+FILE: app/src/main/java/com/example/data/remote/WomenFitAiCloudClient.kt
+REPLACE
+
+package com.example.data.remote
+
+import android.util.Log
+import com.example.data.CloudConnection
+import com.example.data.CloudStatus
+import com.example.data.security.AuthSession
+import com.example.data.security.SessionDataStore
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
+import kotlinx.coroutines.withContext
+import okhttp3.MediaType.Companion.toMediaType
+import okhttp3.OkHttpClient
+import okhttp3.Request
+import okhttp3.RequestBody.Companion.toRequestBody
+import okhttp3.Response
+import org.json.JSONArray
+import org.json.JSONObject
+import java.net.URLEncoder
+import java.util.concurrent.TimeUnit
+
+/**
+ * Direct Supabase PostgREST client for this app's own "womenfit_ai_*" tables.
+ *
+ * Built the same way as the original WomenFit app's SupabaseClient: plain OkHttp + org.json
+ * against the same self-hosted server (SUPABASE_URL / SUPABASE_ANON_KEY), sending
+ * `apikey: <anon key>` and `Authorization: Bearer <user access token>` on every request.
+ * Tokens are refreshed proactively when about to expire and once more on a 401, then the
+ * request is retried. Row Level Security on the server limits every query to the signed-in user.
+ */
+class WomenFitAiCloudClient(
+    private val sessionDataStore: SessionDataStore,
+    private val baseUrlProvider: () -> String = { SupabaseConfig.getBaseUrl() },
+    private val anonKeyProvider: () -> String = { SupabaseConfig.getAnonKey() },
+    private val httpClient: OkHttpClient = OkHttpClient.Builder()
+        .connectTimeout(15, TimeUnit.SECONDS)
+        .readTimeout(20, TimeUnit.SECONDS)
+        .writeTimeout(20, TimeUnit.SECONDS)
+        .build()
+) {
+
+    companion object {
+        private const val TAG = "WomenFitAiCloud"
+        private val JSON_MEDIA_TYPE = "application/json; charset=utf-8".toMediaType()
+
+        // Table names on the shared Supabase server. Prefixed so they never collide with
+        // the original WomenFit app's tables (profiles, workout_logs, water_logs, ...).
+        const val TABLE_USERS = "womenfit_ai_users"
+        const val TABLE_DAILY_PROGRESS = "womenfit_ai_daily_progress"
+        const val TABLE_WORKOUT_LOGS = "womenfit_ai_workout_logs"
+        const val TABLE_WEIGHT_LOGS = "womenfit_ai_weight_logs"
+        const val TABLE_MEAL_LOGS = "womenfit_ai_meal_logs"
+        const val TABLE_DAILY_GOALS = "womenfit_ai_daily_goals"
+    }
+
+    private val refreshMutex = Mutex()
+
+    private val baseUrl: String get() = baseUrlProvider().trim().trimEnd('/')
+    private val anonKey: String get() = anonKeyProvider().trim()
+
+    fun isConfigured(): Boolean = SupabaseConfig.isConfigured(baseUrl, anonKey)
+
+    // -------------------------------------------------------------
+    // Table operations
+    // -------------------------------------------------------------
+
+    /** Bulk insert-or-update rows (POST + Prefer: resolution=merge-duplicates). */
+    suspend fun upsertRows(table: String, rows: JSONArray, onConflict: String = "id"): Boolean {
+        if (rows.length() == 0) return true
+        val response = executeAuthenticated { token ->
+            Request.Builder()
+                .url("$baseUrl/rest/v1/$table?on_conflict=${encode(onConflict)}")
+                .addHeader("apikey", anonKey)
+                .addHeader("Authorization", "Bearer $token")
+                .addHeader("Prefer", "resolution=merge-duplicates,return=minimal")
+                .post(rows.toString().toRequestBody(JSON_MEDIA_TYPE))
+                .build()
+        } ?: return false
+        return response.useAndCheck("upsert $table")
+    }
+
+    /** Reads all of the user's rows from a table. Returns null on failure. */
+    suspend fun fetchRows(table: String, userId: String, order: String? = null): JSONArray? {
+        val orderParam = if (order != null) "&order=${encode(order)}" else ""
+        val response = executeAuthenticated { token ->
+            Request.Builder()
+                .url("$baseUrl/rest/v1/$table?user_id=eq.${encode(userId)}&select=*$orderParam")
+                .addHeader("apikey", anonKey)
+                .addHeader("Authorization", "Bearer $token")
+                .get()
+                .build()
+        } ?: return null
+        return response.use {
+            val body = it.body?.string().orEmpty()
+            if (!it.isSuccessful) {
+                Log.w(TAG, "fetch $table failed (${it.code}): ${body.take(200)}")
+                null
+            } else {
+                try {
+                    JSONArray(body)
+                } catch (e: Exception) {
+                    Log.w(TAG, "fetch $table returned unexpected JSON", e)
+                    null
+                }
+            }
+        }
+    }
+
+    /** PATCH a single row by its uuid. */
+    suspend fun updateRow(table: String, id: String, fields: JSONObject): Boolean {
+        val response = executeAuthenticated { token ->
+            Request.Builder()
+                .url("$baseUrl/rest/v1/$table?id=eq.${encode(id)}")
+                .addHeader("apikey", anonKey)
+                .addHeader("Authorization", "Bearer $token")
+                .addHeader("Prefer", "return=minimal")
+                .patch(fields.toString().toRequestBody(JSON_MEDIA_TYPE))
+                .build()
+        } ?: return false
+        return response.useAndCheck("update $table")
+    }
+
+    /** DELETE a single row by its uuid. */
+    suspend fun deleteRow(table: String, id: String): Boolean {
+        val response = executeAuthenticated { token ->
+            Request.Builder()
+                .url("$baseUrl/rest/v1/$table?id=eq.${encode(id)}")
+                .addHeader("apikey", anonKey)
+                .addHeader("Authorization", "Bearer $token")
+                .delete()
+                .build()
+        } ?: return false
+        return response.useAndCheck("delete $table")
+    }
+
+    // -------------------------------------------------------------
+    // Authenticated execution with token refresh (same flow as WomenFit's SupabaseClient)
+    // -------------------------------------------------------------
+
+    /**
+     * 1. Refreshes the access token first if it is about to expire.
+     * 2. On 401, refreshes once and retries the request.
+     * Returns null when not signed in, not configured, or the network call throws.
+     */
+    private suspend fun executeAuthenticated(buildRequest: (token: String) -> Request): Response? =
+        withContext(Dispatchers.IO) {
+            if (!isConfigured()) return@withContext null
+            val session = sessionDataStore.getSession() ?: return@withContext null
+            try {
+                val token = if (session.isExpired()) {
+                    refreshToken(session) ?: session.accessToken
+                } else {
+                    session.accessToken
+                }
+                var response = httpClient.newCall(buildRequest(token)).execute()
+                if (response.code == 401) {
+                    response.close()
+                    val latest = sessionDataStore.getSession() ?: return@withContext null
+                    val newToken = refreshToken(latest) ?: return@withContext null
+                    response = httpClient.newCall(buildRequest(newToken)).execute()
+                }
+                // The server answered, so the cloud is reachable.
+                CloudStatus.setConnection(CloudConnection.ONLINE)
+                response
+            } catch (e: Exception) {
+                Log.w(TAG, "network error: ${e.javaClass.simpleName}: ${e.message}")
+                CloudStatus.setConnection(CloudConnection.OFFLINE)
+                null
+            }
+        }
+
+    /**
+     * Pings GET /auth/v1/health (no login needed) and updates [CloudStatus.connection].
+     * Used by the "Cloud sync active" badge.
+     */
+    suspend fun checkConnection(): CloudConnection = withContext(Dispatchers.IO) {
+        val state = if (!isConfigured()) {
+            CloudConnection.NOT_CONFIGURED
+        } else {
+            try {
+                val request = Request.Builder()
+                    .url("$baseUrl/auth/v1/health")
+                    .addHeader("apikey", anonKey)
+                    .get()
+                    .build()
+                httpClient.newCall(request).execute().use { response ->
+                    if (response.isSuccessful) CloudConnection.ONLINE else CloudConnection.OFFLINE
+                }
+            } catch (e: Exception) {
+                Log.w(TAG, "health check failed: ${e.javaClass.simpleName}")
+                CloudConnection.OFFLINE
+            }
+        }
+        CloudStatus.setConnection(state)
+        state
+    }
+
+    /**
+     * POST /auth/v1/token?grant_type=refresh_token. Saves the new tokens into the same
+     * DataStore session the auth screens use, so the whole app stays signed in.
+     */
+    private suspend fun refreshToken(session: AuthSession): String? = refreshMutex.withLock {
+        // Another coroutine may have refreshed while we waited for the lock.
+        val current = sessionDataStore.getSession() ?: return@withLock null
+        if (current.accessToken != session.accessToken && !current.isExpired()) {
+            return@withLock current.accessToken
+        }
+        if (current.refreshToken.isBlank()) return@withLock null
+
+        try {
+            val body = JSONObject().put("refresh_token", current.refreshToken)
+            val request = Request.Builder()
+                .url("$baseUrl/auth/v1/token?grant_type=refresh_token")
+                .addHeader("apikey", anonKey)
+                .addHeader("Content-Type", "application/json")
+                .post(body.toString().toRequestBody(JSON_MEDIA_TYPE))
+                .build()
+            httpClient.newCall(request).execute().use { response ->
+                val text = response.body?.string().orEmpty()
+                if (!response.isSuccessful) {
+                    Log.w(TAG, "token refresh failed (${response.code})")
+                    return@withLock null
+                }
+                val json = JSONObject(text)
+                val accessToken = json.optString("access_token")
+                if (accessToken.isBlank()) return@withLock null
+                val now = System.currentTimeMillis()
+                val expiresAt = json.optLong("expires_at", 0L)
+                val expiresIn = json.optLong("expires_in", 3600L)
+                val expiresAtMillis = if (expiresAt > 0L) expiresAt * 1000L else now + expiresIn * 1000L
+                sessionDataStore.saveSession(
+                    current.copy(
+                        accessToken = accessToken,
+                        refreshToken = json.optString("refresh_token", current.refreshToken)
+                            .ifBlank { current.refreshToken },
+                        expiresAtMillis = expiresAtMillis
+                    )
+                )
+                accessToken
+            }
+        } catch (e: Exception) {
+            Log.w(TAG, "token refresh error: ${e.javaClass.simpleName}")
+            null
+        }
+    }
+
+    private fun Response.useAndCheck(label: String): Boolean = use {
+        if (!it.isSuccessful) {
+            Log.w(TAG, "$label failed (${it.code}): ${it.body?.string().orEmpty().take(200)}")
+        }
+        it.isSuccessful
+    }
+
+    private fun encode(value: String): String = URLEncoder.encode(value, "UTF-8")
+}
+FILE: app/src/main/java/com/example/data/FitnessCloudSync.kt
+REPLACE
+
+package com.example.data
+
+import android.util.Log
+import com.example.data.local.AppDatabase
+import com.example.data.remote.WomenFitAiCloudClient
+import com.example.data.remote.WomenFitAiCloudClient.Companion.TABLE_DAILY_GOALS
+import com.example.data.remote.WomenFitAiCloudClient.Companion.TABLE_DAILY_PROGRESS
+import com.example.data.remote.WomenFitAiCloudClient.Companion.TABLE_MEAL_LOGS
+import com.example.data.remote.WomenFitAiCloudClient.Companion.TABLE_WEIGHT_LOGS
+import com.example.data.remote.WomenFitAiCloudClient.Companion.TABLE_WORKOUT_LOGS
+import com.example.model.ActivityRecord
+import com.example.model.DailyGoalItem
+import com.example.model.DailyProgress
+import com.example.model.LoggedMeal
+import com.example.model.WeightLogEntry
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
+import org.json.JSONArray
+import org.json.JSONObject
+import java.util.UUID
+
+/**
+ * Keeps the local Room database (used by the UI, works offline) in sync with this app's
+ * Supabase tables on the shared WomenFit server:
+ *
+ *   daily_progress   <-> womenfit_ai_daily_progress  (one row per user per day)
+ *   activity_history <-> womenfit_ai_workout_logs
+ *   weight_logs      <-> womenfit_ai_weight_logs
+ *   logged_meals     <-> womenfit_ai_meal_logs
+ *   daily_goals      <-> womenfit_ai_daily_goals
+ *
+ * (The profile itself syncs to womenfit_ai_users through SupabaseAuthRepository.)
+ *
+ * - Every new local row gets a client-generated uuid (remoteId) and is pushed right away.
+ * - [syncAll] runs on sign-in / app start: uploads all local rows (filling in uuids for
+ *   older rows), then downloads rows that exist only on the server (new phone, reinstall).
+ * - All failures are logged and swallowed; Room stays the source of truth for the UI and
+ *   anything missed is uploaded again on the next [syncAll].
+ */
+class FitnessCloudSync(
+    private val database: AppDatabase,
+    private val client: WomenFitAiCloudClient,
+    /** Goal deletions not yet confirmed by the server (made offline); retried on each sync. */
+    private val pendingGoalDeletes: PendingDeleteStore = PendingDeleteStore.InMemory()
+) {
+    /** Tiny persistent set of remote ids; SharedPreferences in the app, in-memory in tests. */
+    interface PendingDeleteStore {
+        fun all(): Set<String>
+        fun add(id: String)
+        fun remove(id: String)
+
+        class InMemory : PendingDeleteStore {
+            private val ids = java.util.Collections.synchronizedSet(mutableSetOf<String>())
+            override fun all(): Set<String> = synchronized(ids) { ids.toSet() }
+            override fun add(id: String) { ids.add(id) }
+            override fun remove(id: String) { ids.remove(id) }
+        }
+
+        class Prefs(private val prefs: android.content.SharedPreferences) : PendingDeleteStore {
+            private val key = "pending_goal_deletes"
+            @Synchronized override fun all(): Set<String> = prefs.getStringSet(key, emptySet())!!.toSet()
+            @Synchronized override fun add(id: String) { prefs.edit().putStringSet(key, all() + id).apply() }
+            @Synchronized override fun remove(id: String) { prefs.edit().putStringSet(key, all() - id).apply() }
+        }
+    }
+
+    companion object {
+        private const val TAG = "FitnessCloudSync"
+        private val ISO_DATE = Regex("^\\d{4}-\\d{2}-\\d{2}$")
+
+        fun newRemoteId(): String = UUID.randomUUID().toString()
+    }
+
+    private val progressDao = database.progressDao()
+    private val goalDao = database.dailyGoalDao()
+    private val weightDao = database.weightLogDao()
+    private val activityDao = database.activityRecordDao()
+    private val mealDao = database.loggedMealDao()
+
+    private val syncMutex = Mutex()
+
+    // -------------------------------------------------------------
+    // Single-item pushes (called right after each local write)
+    // -------------------------------------------------------------
+
+    // Each push returns true when the row was saved in Supabase (false = kept on phone only,
+    // it will be uploaded by the next syncAll). Used for the "saved to cloud" alerts.
+
+    suspend fun pushDailyProgress(userId: String, progress: DailyProgress): Boolean {
+        val row = progressToJson(userId, progress) ?: return false
+        return client.upsertRows(TABLE_DAILY_PROGRESS, JSONArray().put(row), onConflict = "user_id,log_date")
+    }
+
+    suspend fun pushWorkout(record: ActivityRecord): Boolean {
+        val row = workoutToJson(record) ?: return false
+        return client.upsertRows(TABLE_WORKOUT_LOGS, JSONArray().put(row))
+    }
+
+    suspend fun pushWeight(entry: WeightLogEntry): Boolean {
+        val row = weightToJson(entry) ?: return false
+        return client.upsertRows(TABLE_WEIGHT_LOGS, JSONArray().put(row))
+    }
+
+    suspend fun pushMeal(meal: LoggedMeal): Boolean {
+        val row = mealToJson(meal) ?: return false
+        return client.upsertRows(TABLE_MEAL_LOGS, JSONArray().put(row))
+    }
+
+    suspend fun pushGoal(goal: DailyGoalItem): Boolean {
+        val row = goalToJson(goal) ?: return false
+        return client.upsertRows(TABLE_DAILY_GOALS, JSONArray().put(row))
+    }
+
+    suspend fun deleteGoal(goal: DailyGoalItem): Boolean {
+        val id = goal.remoteId ?: return false
+        // Remember it first so an offline delete is retried (and never re-downloaded) later.
+        pendingGoalDeletes.add(id)
+        val ok = markGoalDeleted(id)
+        if (ok) pendingGoalDeletes.remove(id)
+        return ok
+    }
+
+    /** Pings the server and updates [CloudStatus.connection] (for the status badge). */
+    suspend fun checkConnection(): CloudConnection = client.checkConnection()
+
+    /** Soft-delete on the server (is_deleted = true) so every phone drops the goal. */
+    private suspend fun markGoalDeleted(id: String): Boolean =
+        client.updateRow(TABLE_DAILY_GOALS, id, JSONObject().put("is_deleted", true))
+
+    // -------------------------------------------------------------
+    // Full two-way sync
+    // -------------------------------------------------------------
+
+    /** Returns true when the sync finished while the server was reachable. */
+    suspend fun syncAll(userId: String): Boolean {
+        if (userId.isBlank()) return false
+        if (!client.isConfigured()) {
+            CloudStatus.setConnection(CloudConnection.NOT_CONFIGURED)
+            return false
+        }
+        return syncMutex.withLock {
+            try {
+                syncDailyProgress(userId)
+                syncWorkouts(userId)
+                syncWeights(userId)
+                syncMeals(userId)
+                syncGoals(userId)
+                Log.i(TAG, "Cloud sync finished")
+                CloudStatus.connection.value == CloudConnection.ONLINE
+            } catch (e: Exception) {
+                Log.w(TAG, "Cloud sync stopped early: ${e.javaClass.simpleName}: ${e.message}")
+                false
+            }
+        }
+    }
+
+    private suspend fun syncDailyProgress(userId: String) {
+        val prefix = "${userId}_"
+        val local = progressDao.getProgressForUserDirect(prefix)
+        val upload = JSONArray()
+        local.mapNotNull { progressToJson(userId, it) }.forEach { upload.put(it) }
+        client.upsertRows(TABLE_DAILY_PROGRESS, upload, onConflict = "user_id,log_date")
+
+        val localKeys = local.map { it.date }.toHashSet()
+        val remote = client.fetchRows(TABLE_DAILY_PROGRESS, userId) ?: return
+        for (i in 0 until remote.length()) {
+            val obj = remote.getJSONObject(i)
+            val key = prefix + obj.optString("log_date")
+            if (key in localKeys) continue
+            progressDao.saveDailyProgress(
+                DailyProgress(
+                    date = key,
+                    waterIntakeMl = obj.optInt("water_intake_ml", 0),
+                    caloriesBurned = obj.optInt("calories_burned", 0),
+                    activeMinutes = obj.optInt("active_minutes", 0),
+                    completedWorkoutsCount = obj.optInt("completed_workouts_count", 0),
+                    streakDays = obj.optInt("streak_days", 1)
+                )
+            )
+        }
+    }
+
+    private suspend fun syncWorkouts(userId: String) {
+        val local = activityDao.getRecordsByUserIdDirect(userId).map { record ->
+            if (record.remoteId == null) {
+                record.copy(remoteId = newRemoteId()).also { activityDao.updateRecord(it) }
+            } else record
+        }
+        client.upsertRows(TABLE_WORKOUT_LOGS, JSONArray().apply {
+            local.mapNotNull { workoutToJson(it) }.forEach { put(it) }
+        })
+
+        val known = local.mapNotNull { it.remoteId }.toHashSet()
+        val remote = client.fetchRows(TABLE_WORKOUT_LOGS, userId, order = "logged_at_ms.asc") ?: return
+        for (i in 0 until remote.length()) {
+            val obj = remote.getJSONObject(i)
+            val id = obj.optString("id")
+            if (id.isBlank() || id in known) continue
+            activityDao.insertRecord(
+                ActivityRecord(
+                    workoutTitle = obj.optString("workout_title"),
+                    durationMinutes = obj.optInt("duration_minutes", 0),
+                    caloriesBurned = obj.optInt("calories_burned", 0),
+                    category = obj.optString("category"),
+                    timestamp = obj.optLong("logged_at_ms", System.currentTimeMillis()),
+                    userId = userId,
+                    remoteId = id
+                )
+            )
+        }
+    }
+
+    private suspend fun syncWeights(userId: String) {
+        val local = weightDao.getWeightLogsByUserIdDirect(userId).map { entry ->
+            if (entry.remoteId == null) {
+                entry.copy(remoteId = newRemoteId()).also { weightDao.updateLog(it) }
+            } else entry
+        }
+        client.upsertRows(TABLE_WEIGHT_LOGS, JSONArray().apply {
+            local.mapNotNull { weightToJson(it) }.forEach { put(it) }
+        })
+
+        val known = local.mapNotNull { it.remoteId }.toHashSet()
+        // Oldest first so Room's auto-increment ids keep the original order (UI sorts by id).
+        val remote = client.fetchRows(TABLE_WEIGHT_LOGS, userId, order = "created_at.asc") ?: return
+        for (i in 0 until remote.length()) {
+            val obj = remote.getJSONObject(i)
+            val id = obj.optString("id")
+            if (id.isBlank() || id in known) continue
+            weightDao.insertLog(
+                WeightLogEntry(
+                    dateString = obj.optString("date_label"),
+                    weightKg = obj.optDouble("weight_kg", 0.0).toFloat(),
+                    waistCm = obj.optNullableFloat("waist_cm"),
+                    hipsCm = obj.optNullableFloat("hips_cm"),
+                    note = obj.optString("note"),
+                    userId = userId,
+                    remoteId = id
+                )
+            )
+        }
+    }
+
+    private suspend fun syncMeals(userId: String) {
+        val local = mealDao.getMealsByUserIdDirect(userId).map { meal ->
+            if (meal.remoteId == null) {
+                meal.copy(remoteId = newRemoteId()).also { mealDao.updateMeal(it) }
+            } else meal
+        }
+        client.upsertRows(TABLE_MEAL_LOGS, JSONArray().apply {
+            local.mapNotNull { mealToJson(it) }.forEach { put(it) }
+        })
+
+        val known = local.mapNotNull { it.remoteId }.toHashSet()
+        val remote = client.fetchRows(TABLE_MEAL_LOGS, userId, order = "logged_at_ms.asc") ?: return
+        for (i in 0 until remote.length()) {
+            val obj = remote.getJSONObject(i)
+            val id = obj.optString("id")
+            if (id.isBlank() || id in known) continue
+            mealDao.insertMeal(
+                LoggedMeal(
+                    title = obj.optString("title"),
+                    category = obj.optString("category"),
+                    calories = obj.optInt("calories", 0),
+                    protein = obj.optInt("protein", 0),
+                    timestamp = obj.optLong("logged_at_ms", System.currentTimeMillis()),
+                    userId = userId,
+                    remoteId = id
+                )
+            )
+        }
+    }
+
+    private suspend fun syncGoals(userId: String) {
+        // 1. Retry deletions that were made while offline.
+        val pending = pendingGoalDeletes.all()
+        for (id in pending) {
+            if (markGoalDeleted(id)) pendingGoalDeletes.remove(id)
+        }
+
+        // 2. Upload local goals. The payload never contains is_deleted, so the upsert can't
+        //    undo a deletion made on another phone (merge-duplicates only sets sent columns).
+        val local = goalDao.getGoalsByUserIdDirect(userId).map { goal ->
+            if (goal.remoteId == null) {
+                goal.copy(remoteId = newRemoteId()).also { goalDao.updateGoal(it) }
+            } else goal
+        }
+        client.upsertRows(TABLE_DAILY_GOALS, JSONArray().apply {
+            local.mapNotNull { goalToJson(it) }.forEach { put(it) }
+        })
+
+        // 3. Download: drop goals deleted elsewhere, add goals created elsewhere.
+        val localByRemoteId = local.filter { it.remoteId != null }.associateBy { it.remoteId!! }
+        val remote = client.fetchRows(TABLE_DAILY_GOALS, userId, order = "created_at.asc") ?: return
+        for (i in 0 until remote.length()) {
+            val obj = remote.getJSONObject(i)
+            val id = obj.optString("id")
+            if (id.isBlank() || id in pending) continue
+            if (obj.optBoolean("is_deleted", false)) {
+                localByRemoteId[id]?.let { goalDao.deleteGoal(it) }
+                continue
+            }
+            if (id in localByRemoteId) continue
+            goalDao.insertGoal(
+                DailyGoalItem(
+                    title = obj.optString("title"),
+                    isCompleted = obj.optBoolean("is_completed", false),
+                    category = obj.optString("category", "Wellness"),
+                    userId = userId,
+                    remoteId = id
+                )
+            )
+        }
+    }
+
+    // -------------------------------------------------------------
+    // Room entity -> Supabase row JSON
+    // (Every row in a bulk upsert must have the same keys, so nulls use JSONObject.NULL.)
+    // -------------------------------------------------------------
+
+    private fun progressToJson(userId: String, progress: DailyProgress): JSONObject? {
+        val date = progress.date.removePrefix("${userId}_")
+        if (!ISO_DATE.matches(date)) return null
+        return JSONObject()
+            .put("user_id", userId)
+            .put("log_date", date)
+            .put("water_intake_ml", progress.waterIntakeMl)
+            .put("calories_burned", progress.caloriesBurned)
+            .put("active_minutes", progress.activeMinutes)
+            .put("completed_workouts_count", progress.completedWorkoutsCount)
+            .put("streak_days", progress.streakDays)
+    }
+
+    private fun workoutToJson(record: ActivityRecord): JSONObject? {
+        val id = record.remoteId ?: return null
+        return JSONObject()
+            .put("id", id)
+            .put("user_id", record.userId)
+            .put("workout_title", record.workoutTitle)
+            .put("duration_minutes", record.durationMinutes)
+            .put("calories_burned", record.caloriesBurned)
+            .put("category", record.category)
+            .put("logged_at_ms", record.timestamp)
+    }
+
+    private fun weightToJson(entry: WeightLogEntry): JSONObject? {
+        val id = entry.remoteId ?: return null
+        return JSONObject()
+            .put("id", id)
+            .put("user_id", entry.userId)
+            .put("date_label", entry.dateString)
+            .put("weight_kg", entry.weightKg.toDouble())
+            .put("waist_cm", entry.waistCm?.toDouble() ?: JSONObject.NULL)
+            .put("hips_cm", entry.hipsCm?.toDouble() ?: JSONObject.NULL)
+            .put("note", entry.note)
+    }
+
+    private fun mealToJson(meal: LoggedMeal): JSONObject? {
+        val id = meal.remoteId ?: return null
+        return JSONObject()
+            .put("id", id)
+            .put("user_id", meal.userId)
+            .put("title", meal.title)
+            .put("category", meal.category)
+            .put("calories", meal.calories)
+            .put("protein", meal.protein)
+            .put("logged_at_ms", meal.timestamp)
+    }
+
+    private fun goalToJson(goal: DailyGoalItem): JSONObject? {
+        val id = goal.remoteId ?: return null
+        return JSONObject()
+            .put("id", id)
+            .put("user_id", goal.userId)
+            .put("title", goal.title)
+            .put("category", goal.category)
+            .put("is_completed", goal.isCompleted)
+    }
+
+    private fun JSONObject.optNullableFloat(key: String): Float? =
+        if (isNull(key)) null else optDouble(key).takeUnless { it.isNaN() }?.toFloat()
+}
+FILE: app/src/main/java/com/example/data/FitnessRepository.kt
+REPLACE
+
+package com.example.data
+
+import com.example.data.local.AppDatabase
+import com.example.model.*
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.ExperimentalCoroutinesApi
+import kotlinx.coroutines.flow.*
+import kotlinx.coroutines.launch
+import java.text.SimpleDateFormat
+import java.util.*
+
+/**
+ * Fitness & Wellness Repository.
+ *
+ * All user data streams (profile, hydration/daily progress, goals, weight logs,
+ * workout history, and logged meals) are strictly scoped to the currently
+ * authenticated user's ID from AuthRepository.
+ */
+class FitnessRepository(
+    private val database: AppDatabase,
+    private val activeUserIdFlow: StateFlow<String?> = MutableStateFlow(null),
+    private val coachService: GeminiCoachService = GeminiCoachService(),
+    private val scope: CoroutineScope = CoroutineScope(Dispatchers.IO),
+    /** Saves the profile to Supabase; returns true when it reached the cloud. */
+    private val onProfileSync: suspend (UserProfile) -> Boolean = { false },
+    /** Supabase womenfit_ai_* table sync. Null = local-only (e.g. unit tests). */
+    private val cloudSync: FitnessCloudSync? = null
+) {
+    private val userDao = database.userDao()
+    private val progressDao = database.progressDao()
+    private val dailyGoalDao = database.dailyGoalDao()
+    private val weightLogDao = database.weightLogDao()
+    private val activityRecordDao = database.activityRecordDao()
+    private val loggedMealDao = database.loggedMealDao()
+
+    init {
+        // Whenever a user signs in (or the app starts with a saved session), do a full
+        // two-way sync with the Supabase womenfit_ai_* tables.
+        if (cloudSync != null) {
+            scope.launch {
+                // StateFlow only emits on change (sign-out emits null in between), so this
+                // runs once per sign-in, including signing back in to the same account.
+                activeUserIdFlow.collect { uid ->
+                    if (!uid.isNullOrBlank()) {
+                        val ok = runCatching { cloudSync.syncAll(uid) }.getOrDefault(false)
+                        if (ok) {
+                            CloudStatus.alert("☁️ Cloud sync complete — your data is up to date", isSuccess = true)
+                        } else if (CloudStatus.connection.value != CloudConnection.NOT_CONFIGURED) {
+                            CloudStatus.alert("📱 Offline — your data is safe on this phone and will sync later", isSuccess = false)
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    /**
+     * Fire-and-forget upload; never blocks or crashes the UI if the network fails.
+     * When [alertLabel] is set, shows "<label> — saved to cloud ✓" (or the offline variant).
+     */
+    private fun cloud(alertLabel: String? = null, block: suspend FitnessCloudSync.() -> Boolean) {
+        val sync = cloudSync ?: return
+        scope.launch {
+            val ok = try {
+                sync.block()
+            } catch (e: Exception) {
+                android.util.Log.w("FitnessRepository", "cloud push failed: ${e.javaClass.simpleName}")
+                false
+            }
+            if (alertLabel != null) CloudStatus.reportSave(alertLabel, ok)
+        }
+    }
+
+    private val todayString: String
+        get() = SimpleDateFormat("yyyy-MM-dd", Locale.getDefault()).format(Date())
+
+    // In-memory chat message state for Coach Maya
+    private val _chatMessages = MutableStateFlow<List<ChatMessage>>(
+        listOf(
+            ChatMessage(
+                id = "msg_welcome",
+                sender = MessageSender.COACH_MAYA,
+                text = "Hello gorgeous! 🌸 I'm Coach Maya, your personal female fitness & wellness coach. How can I support your fitness, cycle syncing, nutrition, or motivation today?"
+            )
+        )
+    )
+    val chatMessages: StateFlow<List<ChatMessage>> = _chatMessages.asStateFlow()
+
+    private val _isCoachThinking = MutableStateFlow(false)
+    val isCoachThinking: StateFlow<Boolean> = _isCoachThinking.asStateFlow()
+
+    // User Profile - Strictly scoped to authenticated user ID
+    @OptIn(ExperimentalCoroutinesApi::class)
+    val userProfile: Flow<UserProfile> = activeUserIdFlow.flatMapLatest { uid ->
+        if (uid.isNullOrBlank()) {
+            flowOf(UserProfile(id = "", name = "", email = ""))
+        } else {
+            userDao.getUserProfileById(uid).map {
+                it ?: UserProfile(id = uid, name = "WomanFit Member", email = "")
+            }
+        }
+    }
+
+    suspend fun updateUser(user: UserProfile) {
+        val targetId = activeUserIdFlow.value ?: return
+        val updated = user.copy(id = targetId)
+        userDao.insertOrUpdate(updated)
+        val savedToCloud = runCatching { onProfileSync(updated) }.getOrDefault(false)
+        CloudStatus.reportSave("👤 Profile", savedToCloud)
+    }
+
+    // Progress - isolated per user ID
+    @OptIn(ExperimentalCoroutinesApi::class)
+    val dailyProgress: Flow<DailyProgress> = activeUserIdFlow.flatMapLatest { uid ->
+        if (uid.isNullOrBlank()) {
+            flowOf(DailyProgress(date = todayString))
+        } else {
+            val userDateKey = "${uid}_$todayString"
+            progressDao.getDailyProgress(userDateKey).map { prog ->
+                prog ?: DailyProgress(date = userDateKey, streakDays = 1)
+            }
+        }
+    }
+
+    suspend fun incrementWater(amount: Int) {
+        val uid = activeUserIdFlow.value ?: return
+        val userDateKey = "${uid}_$todayString"
+        val current = progressDao.getDailyProgress(userDateKey).firstOrNull()
+            ?: DailyProgress(date = userDateKey, streakDays = 1)
+        val updated = current.copy(
+            date = userDateKey,
+            waterIntakeMl = (current.waterIntakeMl + amount).coerceAtLeast(0)
+        )
+        progressDao.saveDailyProgress(updated)
+        val label = if (amount >= 0) "💧 Water +$amount ml" else "💧 Water ${amount} ml"
+        cloud(label) { pushDailyProgress(uid, updated) }
+    }
+
+    suspend fun resetWater() {
+        val uid = activeUserIdFlow.value ?: return
+        val userDateKey = "${uid}_$todayString"
+        val current = progressDao.getDailyProgress(userDateKey).firstOrNull()
+            ?: DailyProgress(date = userDateKey, streakDays = 1)
+        val updated = current.copy(date = userDateKey, waterIntakeMl = 0)
+        progressDao.saveDailyProgress(updated)
+        cloud("💧 Water reset") { pushDailyProgress(uid, updated) }
+    }
+
+    // Goals - isolated per user ID
+    @OptIn(ExperimentalCoroutinesApi::class)
+    val dailyGoals: Flow<List<DailyGoalItem>> = activeUserIdFlow.flatMapLatest { uid ->
+        if (uid.isNullOrBlank()) {
+            flowOf(emptyList())
+        } else {
+            dailyGoalDao.getGoalsByUserId(uid)
+        }
+    }
+
+    suspend fun toggleGoal(goal: DailyGoalItem) {
+        val updated = goal.copy(isCompleted = !goal.isCompleted)
+        dailyGoalDao.updateGoal(updated)
+        if (updated.remoteId != null) {
+            val label = if (updated.isCompleted) "✅ Goal completed" else "↩️ Goal marked not done"
+            cloud(label) { pushGoal(updated) }
+        }
+    }
+
+    suspend fun addGoal(title: String, category: String) {
+        val uid = activeUserIdFlow.value ?: return
+        val goal = DailyGoalItem(
+            title = title,
+            isCompleted = false,
+            category = category,
+            userId = uid,
+            remoteId = FitnessCloudSync.newRemoteId()
+        )
+        dailyGoalDao.insertGoal(goal)
+        cloud("🎯 Goal \"$title\" added") { pushGoal(goal) }
+    }
+
+    suspend fun deleteGoal(goal: DailyGoalItem) {
+        dailyGoalDao.deleteGoal(goal)
+        if (goal.remoteId != null) {
+            cloud("🗑️ Goal deleted") { this.deleteGoal(goal) } // `this` = FitnessCloudSync
+        }
+    }
+
+    // Weight logs - isolated per user ID
+    @OptIn(ExperimentalCoroutinesApi::class)
+    val weightLogs: Flow<List<WeightLogEntry>> = activeUserIdFlow.flatMapLatest { uid ->
+        if (uid.isNullOrBlank()) {
+            flowOf(emptyList())
+        } else {
+            weightLogDao.getWeightLogsByUserId(uid)
+        }
+    }
+
+    suspend fun logWeight(weight: Float, waist: Float?, hips: Float?, note: String) {
+        val uid = activeUserIdFlow.value ?: return
+        val dateLabel = SimpleDateFormat("MMM d", Locale.getDefault()).format(Date())
+        val entry = WeightLogEntry(
+            dateString = dateLabel,
+            weightKg = weight,
+            waistCm = waist,
+            hipsCm = hips,
+            note = note,
+            userId = uid,
+            remoteId = FitnessCloudSync.newRemoteId()
+        )
+        weightLogDao.insertLog(entry)
+        cloud("⚖️ Weight ${"%.1f".format(Locale.US, weight)} kg") { pushWeight(entry) }
+
+        val currentProfile = userProfile.first()
+        if (currentProfile.id.isNotBlank()) {
+            val updatedProfile = currentProfile.copy(currentWeightKg = weight)
+            userDao.insertOrUpdate(updatedProfile)
+            onProfileSync(updatedProfile)
+        }
+    }
+
+    // Activity Records - isolated per user ID
+    @OptIn(ExperimentalCoroutinesApi::class)
+    val activityRecords: Flow<List<ActivityRecord>> = activeUserIdFlow.flatMapLatest { uid ->
+        if (uid.isNullOrBlank()) {
+            flowOf(emptyList())
+        } else {
+            activityRecordDao.getRecordsByUserId(uid)
+        }
+    }
+
+    suspend fun logCompletedWorkout(plan: WorkoutPlan) {
+        val uid = activeUserIdFlow.value ?: return
+        val record = ActivityRecord(
+            workoutTitle = plan.title,
+            durationMinutes = plan.durationMinutes,
+            caloriesBurned = plan.estimatedCalories,
+            category = plan.category.title,
+            userId = uid,
+            remoteId = FitnessCloudSync.newRemoteId()
+        )
+        activityRecordDao.insertRecord(record)
+        cloud("🏋️ Workout \"${plan.title}\"") { pushWorkout(record) }
+
+        val userDateKey = "${uid}_$todayString"
+        val current = progressDao.getDailyProgress(userDateKey).firstOrNull()
+            ?: DailyProgress(date = userDateKey, streakDays = 1)
+        val updated = current.copy(
+            date = userDateKey,
+            caloriesBurned = current.caloriesBurned + plan.estimatedCalories,
+            activeMinutes = current.activeMinutes + plan.durationMinutes,
+            completedWorkoutsCount = current.completedWorkoutsCount + 1
+        )
+        progressDao.saveDailyProgress(updated)
+        cloud { pushDailyProgress(uid, updated) }
+    }
+
+    // Logged Meals - isolated per user ID
+    @OptIn(ExperimentalCoroutinesApi::class)
+    val loggedMeals: Flow<List<LoggedMeal>> = activeUserIdFlow.flatMapLatest { uid ->
+        if (uid.isNullOrBlank()) {
+            flowOf(emptyList())
+        } else {
+            loggedMealDao.getMealsByUserId(uid)
+        }
+    }
+
+    suspend fun logMeal(title: String, category: String, calories: Int, protein: Int) {
+        val uid = activeUserIdFlow.value ?: return
+        val meal = LoggedMeal(
+            title = title,
+            category = category,
+            calories = calories,
+            protein = protein,
+            userId = uid,
+            remoteId = FitnessCloudSync.newRemoteId()
+        )
+        loggedMealDao.insertMeal(meal)
+        cloud("🥗 Meal \"$title\"") { pushMeal(meal) }
+    }
+
+    // Workouts catalog
+    val workouts: List<WorkoutPlan> = WorkoutData.sampleWorkouts
+
+    // Nutrition recipes catalog
+    val recipes: List<Recipe> = NutritionData.sampleRecipes
+
+    // Badges calculation
+    val badges: Flow<List<AchievementBadge>> = combine(
+        dailyProgress,
+        activityRecords,
+        weightLogs
+    ) { progress, activities, weights ->
+        listOf(
+            AchievementBadge(
+                id = "badge_streak_7",
+                title = "7-Day Queen",
+                description = "Completed fitness streak for 7 consecutive days",
+                iconEmoji = "👑",
+                isUnlocked = progress.streakDays >= 7,
+                unlockedDate = if (progress.streakDays >= 7) "Unlocked" else null
+            ),
+            AchievementBadge(
+                id = "badge_workout_first",
+                title = "First Step Glow",
+                description = "Logged your very first workout in WomanFit",
+                iconEmoji = "🌸",
+                isUnlocked = activities.isNotEmpty(),
+                unlockedDate = if (activities.isNotEmpty()) "Unlocked" else null
+            ),
+            AchievementBadge(
+                id = "badge_hydration_master",
+                title = "Hydration Goddess",
+                description = "Met your daily personalized water target",
+                iconEmoji = "💧",
+                isUnlocked = progress.waterIntakeMl >= 2000,
+                unlockedDate = if (progress.waterIntakeMl >= 2000) "Unlocked" else null
+            ),
+            AchievementBadge(
+                id = "badge_weight_tracker",
+                title = "Body Harmony",
+                description = "Consistently logged progress measurements",
+                iconEmoji = "✨",
+                isUnlocked = weights.size >= 3,
+                unlockedDate = if (weights.size >= 3) "Unlocked" else null
+            )
+        )
+    }
+
+    // AI Coach Interaction
+    fun askCoachMaya(userQuestion: String) {
+        val userMsg = ChatMessage(
+            id = UUID.randomUUID().toString(),
+            sender = MessageSender.USER,
+            text = userQuestion
+        )
+        _chatMessages.value = _chatMessages.value + userMsg
+
+        scope.launch {
+            _isCoachThinking.value = true
+            val currentProfile = userProfile.first()
+
+            val cyclePhase = if (currentProfile.lastPeriodStartTimestamp > 0L) {
+                val cycleStatus = CycleCalculator.getStatus(
+                    currentProfile.lastPeriodStartTimestamp,
+                    currentProfile.cycleLengthDays
+                )
+                cycleStatus.phase.phaseName
+            } else {
+                "Regular"
+            }
+
+            val coachReplyText = coachService.askCoachMaya(
+                userQuestion = userQuestion,
+                userGoal = currentProfile.fitnessGoal,
+                fitnessLevel = currentProfile.fitnessLevel,
+                cyclePhase = cyclePhase
+            )
+
+            val replyMsg = ChatMessage(
+                id = UUID.randomUUID().toString(),
+                sender = MessageSender.COACH_MAYA,
+                text = coachReplyText
+            )
+            _chatMessages.value = _chatMessages.value + replyMsg
+            _isCoachThinking.value = false
+        }
+    }
+
+    fun clearChat() {
+        _chatMessages.value = listOf(
+            ChatMessage(
+                id = "msg_welcome",
+                sender = MessageSender.COACH_MAYA,
+                text = "Hello gorgeous! 🌸 Chat cleared. What would you like to focus on now?"
+            )
+        )
+    }
+}
+FILE: app/src/main/java/com/example/data/AuthRepository.kt
+REPLACE
+
+package com.example.data
+
+import com.example.model.UserProfile
+import kotlinx.coroutines.flow.StateFlow
+
+sealed interface SessionState {
+    data object Loading : SessionState
+    data object LoggedOut : SessionState
+    data class LoggedIn(val userId: String) : SessionState
+}
+
+enum class AuthField {
+    GENERAL,
+    FULL_NAME,
+    EMAIL,
+    PASSWORD,
+    CONFIRM_PASSWORD
+}
+
+sealed interface AuthResult {
+    data class Success(
+        val userId: String,
+        val email: String,
+        val fullName: String
+    ) : AuthResult
+
+    data class EmailVerificationRequired(
+        val email: String,
+        val message: String
+    ) : AuthResult
+
+    data class Error(
+        val message: String,
+        val field: AuthField = AuthField.GENERAL
+    ) : AuthResult
+}
+
+sealed interface ResetRequestResult {
+    data class Success(val message: String) : ResetRequestResult
+    data class Error(val message: String) : ResetRequestResult
+}
+
+/**
+ * Authentication Repository Contract.
+ *
+ * Strictly enforces backend-verified authentication, session restoration,
+ * token refresh, profile synchronization, and secure sign out.
+ */
+interface AuthRepository {
+    val activeUserId: StateFlow<String?>
+    val sessionState: StateFlow<SessionState>
+
+    suspend fun restoreAndVerifySession(): SessionState
+
+    suspend fun signIn(
+        emailInput: String,
+        passwordInput: String
+    ): AuthResult
+
+    suspend fun signUp(
+        fullNameInput: String,
+        emailInput: String,
+        passwordInput: String,
+        confirmPasswordInput: String
+    ): AuthResult
+
+    suspend fun requestPasswordReset(emailInput: String): ResetRequestResult
+
+    /** Saves the profile to Supabase (womenfit_ai_users). Returns true when it reached the cloud. */
+    suspend fun syncProfileUpdate(userProfile: UserProfile): Boolean
+
+    suspend fun signOut()
+}
+SMALL EDIT: app/src/main/java/com/example/data/SupabaseAuthRepository.kt
+Replace only the syncProfileUpdate function with this version (now returns Boolean and updates CloudStatus). CloudStatus/CloudConnection are in the same package; java.io.IOException is already imported. Nothing else in this file changes.
+
+    override suspend fun syncProfileUpdate(userProfile: UserProfile): Boolean {
+        val session = sessionDataStore.getSession() ?: return false
+        if (session.userId != userProfile.id) return false
+        val api = apiProvider() ?: return false
+        val anonKey = anonKeyProvider()
+        if (anonKey.isBlank() || anonKey == "DEFAULT_EMPTY") return false
+
+        return try {
+            val response = api.upsertUserProfile(
+                apiKey = anonKey,
+                authorization = "Bearer ${session.accessToken}",
+                profile = SupabaseProfileDto(
+                    id = session.userId,
+                    fullName = userProfile.name.ifBlank { session.fullName },
+                    email = userProfile.email.ifBlank { session.email },
+                    fitnessGoal = userProfile.fitnessGoal,
+                    fitnessLevel = userProfile.fitnessLevel,
+                    age = userProfile.age,
+                    heightCm = userProfile.heightCm,
+                    currentWeightKg = userProfile.currentWeightKg,
+                    targetWeightKg = userProfile.targetWeightKg,
+                    dailyWaterGoalMl = userProfile.dailyWaterGoalMl,
+                    cycleLengthDays = userProfile.cycleLengthDays,
+                    lastPeriodStartTimestamp = userProfile.lastPeriodStartTimestamp
+                )
+            )
+            CloudStatus.setConnection(CloudConnection.ONLINE)
+            response.isSuccessful
+        } catch (_: IOException) {
+            // No connection: keep local Room state authoritative until backend sync succeeds
+            CloudStatus.setConnection(CloudConnection.OFFLINE)
+            false
+        } catch (_: Exception) {
+            false
+        }
+    }
+FILE: app/src/main/java/com/example/MainActivity.kt
+REPLACE
+
+package com.example
+
+import android.os.Bundle
+import androidx.activity.ComponentActivity
+import androidx.activity.compose.BackHandler
+import androidx.activity.compose.setContent
+import androidx.activity.enableEdgeToEdge
+import androidx.activity.viewModels
+import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.navigationBarsPadding
+import androidx.compose.foundation.layout.padding
+import androidx.compose.material3.Scaffold
+import androidx.compose.runtime.*
+import androidx.compose.ui.Alignment
+import androidx.compose.ui.Modifier
+import androidx.compose.ui.unit.dp
+import com.example.ui.components.CloudAlertHost
+import androidx.navigation.compose.NavHost
+import androidx.navigation.compose.composable
+import androidx.navigation.compose.navigation
+import androidx.navigation.compose.rememberNavController
+import com.example.data.SessionState
+import com.example.ui.AuthViewModel
+import com.example.ui.FitnessViewModel
+import com.example.ui.MainTab
+import com.example.ui.components.WomanFitBottomNav
+import com.example.ui.screens.*
+import com.example.ui.theme.WomanFitTheme
+
+object NavRoutes {
+    const val SPLASH = "splash_screen"
+
+    const val AUTH_GRAPH = "auth_graph"
+    const val SIGN_IN = "sign_in_screen"
+    const val SIGN_UP = "sign_up_screen"
+    const val FORGOT_PASSWORD = "forgot_password_screen"
+
+    const val MAIN_GRAPH = "main_graph"
+    const val HOME_CONTAINER = "home_container_screen"
+}
+
+class MainActivity : ComponentActivity() {
+
+    private val authViewModel: AuthViewModel by viewModels()
+    private val fitnessViewModel: FitnessViewModel by viewModels()
+
+    override fun onCreate(savedInstanceState: Bundle?) {
+        super.onCreate(savedInstanceState)
+        enableEdgeToEdge()
+        com.example.ui.notifications.WellnessNotificationManager.createNotificationChannel(this)
+        setContent {
+            WomanFitTheme {
+                WomanFitApp(
+                    authViewModel = authViewModel,
+                    fitnessViewModel = fitnessViewModel
+                )
+            }
+        }
+    }
+}
+
+@Composable
+fun WomanFitApp(
+    authViewModel: AuthViewModel,
+    fitnessViewModel: FitnessViewModel
+) {
+    val navController = rememberNavController()
+    val sessionState by authViewModel.sessionState.collectAsState()
+
+    Box(modifier = Modifier.fillMaxSize()) {
+        NavHost(
+            navController = navController,
+            startDestination = NavRoutes.SPLASH
+        ) {
+            // 1. Splash / Cold Launch Session Verification (Never renders Dashboard prior to check)
+            composable(NavRoutes.SPLASH) {
+                SplashScreen()
+
+                LaunchedEffect(sessionState) {
+                    when (sessionState) {
+                        is SessionState.LoggedIn -> {
+                            navController.navigate(NavRoutes.MAIN_GRAPH) {
+                                popUpTo(NavRoutes.SPLASH) { inclusive = true }
+                                launchSingleTop = true
+                            }
+                        }
+                        is SessionState.LoggedOut -> {
+                            navController.navigate(NavRoutes.AUTH_GRAPH) {
+                                popUpTo(NavRoutes.SPLASH) { inclusive = true }
+                                launchSingleTop = true
+                            }
+                        }
+                        is SessionState.Loading -> {
+                            // Hold splash until DataStore & token verification finishes
+                        }
+                    }
+                }
+            }
+
+            // 2. Authentication Graph (SignIn, SignUp, ForgotPassword)
+            navigation(
+                startDestination = NavRoutes.SIGN_IN,
+                route = NavRoutes.AUTH_GRAPH
+            ) {
+                composable(NavRoutes.SIGN_IN) {
+                    SignInScreen(
+                        authViewModel = authViewModel,
+                        onNavigateToSignUp = {
+                            navController.navigate(NavRoutes.SIGN_UP) {
+                                launchSingleTop = true
+                            }
+                        },
+                        onNavigateToForgotPassword = {
+                            navController.navigate(NavRoutes.FORGOT_PASSWORD) {
+                                launchSingleTop = true
+                            }
+                        },
+                        onSignInSuccess = {
+                            navController.navigate(NavRoutes.MAIN_GRAPH) {
+                                popUpTo(NavRoutes.AUTH_GRAPH) { inclusive = true }
+                                launchSingleTop = true
+                            }
+                        }
+                    )
+                }
+
+                composable(NavRoutes.SIGN_UP) {
+                    SignUpScreen(
+                        authViewModel = authViewModel,
+                        onNavigateToSignIn = {
+                            navController.popBackStack()
+                        },
+                        onSignUpSuccess = {
+                            navController.navigate(NavRoutes.MAIN_GRAPH) {
+                                popUpTo(NavRoutes.AUTH_GRAPH) { inclusive = true }
+                                launchSingleTop = true
+                            }
+                        }
+                    )
+                }
+
+                composable(NavRoutes.FORGOT_PASSWORD) {
+                    ForgotPasswordScreen(
+                        authViewModel = authViewModel,
+                        onBackToSignIn = {
+                            navController.popBackStack()
+                        }
+                    )
+                }
+            }
+
+            // 3. Main App Graph (Protected by Navigation Authentication Guard)
+            navigation(
+                startDestination = NavRoutes.HOME_CONTAINER,
+                route = NavRoutes.MAIN_GRAPH
+            ) {
+                composable(NavRoutes.HOME_CONTAINER) {
+                    // Navigation Authentication Guard: Force redirect if session ever becomes unauthenticated
+                    LaunchedEffect(sessionState) {
+                        if (sessionState is SessionState.LoggedOut) {
+                            fitnessViewModel.resetUiStateOnSignOut()
+                            navController.navigate(NavRoutes.AUTH_GRAPH) {
+                                popUpTo(NavRoutes.MAIN_GRAPH) { inclusive = true }
+                                launchSingleTop = true
+                            }
+                        }
+                    }
+
+                    if (sessionState is SessionState.LoggedIn) {
+                        MainContainerScreen(
+                            viewModel = fitnessViewModel,
+                            onSignOutConfirmed = {
+                                authViewModel.signOut {
+                                    fitnessViewModel.resetUiStateOnSignOut()
+                                    navController.navigate(NavRoutes.AUTH_GRAPH) {
+                                        popUpTo(NavRoutes.MAIN_GRAPH) { inclusive = true }
+                                        launchSingleTop = true
+                                    }
+                                }
+                            }
+                        )
+                    } else {
+                        SplashScreen()
+                    }
+                }
+            }
+        }
+
+        // App-wide alerts after every save / sync ("💧 Water +250 ml — saved to cloud ✓"),
+        // shown above the bottom navigation bar on every screen.
+        CloudAlertHost(
+            modifier = Modifier
+                .align(Alignment.BottomCenter)
+                .navigationBarsPadding()
+                .padding(bottom = 84.dp)
+        )
+    }
+}
+
+/**
+ * Main App Container
+ *
+ * Hosts interactive workouts and the 7 bottom-navigation tabs.
+ */
+@Composable
+fun MainContainerScreen(
+    viewModel: FitnessViewModel,
+    onSignOutConfirmed: () -> Unit
+) {
+    val currentTab by viewModel.currentTab.collectAsState()
+    val activeWorkout by viewModel.activeWorkout.collectAsState()
+
+    // Handle back button on secondary tabs to navigate to Home
+    if (activeWorkout == null && currentTab != MainTab.HOME) {
+        BackHandler {
+            viewModel.selectTab(MainTab.HOME)
+        }
+    }
+
+    if (activeWorkout != null) {
+        WorkoutPlayerScreen(
+            plan = activeWorkout!!,
+            viewModel = viewModel
+        )
+    } else {
+        Scaffold(
+            modifier = Modifier.fillMaxSize(),
+            bottomBar = {
+                WomanFitBottomNav(
+                    currentTab = currentTab,
+                    onTabSelected = { viewModel.selectTab(it) }
+                )
+            }
+        ) { innerPadding ->
+            val screenModifier = Modifier
+                .fillMaxSize()
+                .padding(bottom = innerPadding.calculateBottomPadding())
+
+            when (currentTab) {
+                MainTab.HOME -> DashboardScreen(
+                    viewModel = viewModel,
+                    modifier = screenModifier
+                )
+                MainTab.CYCLE -> CycleScreen(
+                    viewModel = viewModel,
+                    modifier = screenModifier
+                )
+                MainTab.WORKOUTS -> WorkoutsScreen(
+                    viewModel = viewModel,
+                    modifier = screenModifier
+                )
+                MainTab.NUTRITION -> NutritionScreen(
+                    viewModel = viewModel,
+                    modifier = screenModifier
+                )
+                MainTab.COACH -> AiCoachScreen(
+                    viewModel = viewModel,
+                    modifier = screenModifier
+                )
+                MainTab.PROGRESS -> ProgressScreen(
+                    viewModel = viewModel,
+                    modifier = screenModifier
+                )
+                MainTab.PROFILE -> ProfileScreen(
+                    viewModel = viewModel,
+                    onSignOutConfirmed = onSignOutConfirmed,
+                    modifier = screenModifier
+                )
+            }
+        }
+    }
+}
+PART 2 - SMALL EDITS
+SMALL EDIT: app/src/main/java/com/example/ui/screens/SignInScreen.kt
+Add the import, then right after the subtitle Text("Your Fitness & Wellness Journey Starts Here") replace the following Spacer(height 24.dp) with these lines.
+
+// import (top of file)
+import com.example.ui.components.CloudSyncBadge
+
+// after the subtitle Text(...)
+Spacer(modifier = Modifier.height(14.dp))
+
+// Live Supabase connection indicator ("● Cloud sync active")
+CloudSyncBadge()
+
+Spacer(modifier = Modifier.height(20.dp))
+SMALL EDIT: app/src/main/java/com/example/ui/screens/SignUpScreen.kt
+Same as Sign In: add the import, then right after the subtitle Text("Create Your Personal Wellness Account") replace the following Spacer(height 24.dp) with these lines.
+
+// import (top of file)
+import com.example.ui.components.CloudSyncBadge
+
+// after the subtitle Text(...)
+Spacer(modifier = Modifier.height(14.dp))
+
+// Live Supabase connection indicator ("● Cloud sync active")
+CloudSyncBadge()
+
+Spacer(modifier = Modifier.height(20.dp))
+SMALL EDIT: app/src/main/java/com/example/ui/screens/ProfileScreen.kt
+Add the import. In the top profile banner card, after the goal/level chip Surface ("👑 fitnessGoal • fitnessLevel") and before the "Edit Personal Stats" OutlinedButton, replace the Spacer(height 14.dp) with these lines.
+
+// import (top of file)
+import com.example.ui.components.CloudSyncBadge
+
+// after the goal chip Surface { ... }
+Spacer(modifier = Modifier.height(10.dp))
+
+// Live Supabase connection indicator ("● Cloud sync active")
+CloudSyncBadge()
+
+Spacer(modifier = Modifier.height(14.dp))
+END OF UPDATE. Please apply everything above, then build and run the tests.
+

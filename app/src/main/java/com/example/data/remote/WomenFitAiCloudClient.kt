@@ -1,6 +1,8 @@
 package com.example.data.remote
 
 import android.util.Log
+import com.example.data.CloudConnection
+import com.example.data.CloudStatus
 import com.example.data.security.AuthSession
 import com.example.data.security.SessionDataStore
 import kotlinx.coroutines.Dispatchers
@@ -157,12 +159,41 @@ class WomenFitAiCloudClient(
                     val newToken = refreshToken(latest) ?: return@withContext null
                     response = httpClient.newCall(buildRequest(newToken)).execute()
                 }
+                // The server answered, so the cloud is reachable.
+                CloudStatus.setConnection(CloudConnection.ONLINE)
                 response
             } catch (e: Exception) {
                 Log.w(TAG, "network error: ${e.javaClass.simpleName}: ${e.message}")
+                CloudStatus.setConnection(CloudConnection.OFFLINE)
                 null
             }
         }
+
+    /**
+     * Pings GET /auth/v1/health (no login needed) and updates [CloudStatus.connection].
+     * Used by the "Cloud sync active" badge.
+     */
+    suspend fun checkConnection(): CloudConnection = withContext(Dispatchers.IO) {
+        val state = if (!isConfigured()) {
+            CloudConnection.NOT_CONFIGURED
+        } else {
+            try {
+                val request = Request.Builder()
+                    .url("$baseUrl/auth/v1/health")
+                    .addHeader("apikey", anonKey)
+                    .get()
+                    .build()
+                httpClient.newCall(request).execute().use { response ->
+                    if (response.isSuccessful) CloudConnection.ONLINE else CloudConnection.OFFLINE
+                }
+            } catch (e: Exception) {
+                Log.w(TAG, "health check failed: ${e.javaClass.simpleName}")
+                CloudConnection.OFFLINE
+            }
+        }
+        CloudStatus.setConnection(state)
+        state
+    }
 
     /**
      * POST /auth/v1/token?grant_type=refresh_token. Saves the new tokens into the same
