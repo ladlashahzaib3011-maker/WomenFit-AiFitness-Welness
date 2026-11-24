@@ -1,6 +1,7 @@
 package com.example.data
 
 import android.util.Log
+import androidx.core.content.edit
 import com.example.data.local.AppDatabase
 import com.example.data.remote.WomenFitAiCloudClient
 import com.example.data.remote.WomenFitAiCloudClient.Companion.TABLE_DAILY_GOALS
@@ -59,8 +60,8 @@ class FitnessCloudSync(
         class Prefs(private val prefs: android.content.SharedPreferences) : PendingDeleteStore {
             private val key = "pending_goal_deletes"
             @Synchronized override fun all(): Set<String> = prefs.getStringSet(key, emptySet())!!.toSet()
-            @Synchronized override fun add(id: String) { prefs.edit().putStringSet(key, all() + id).apply() }
-            @Synchronized override fun remove(id: String) { prefs.edit().putStringSet(key, all() - id).apply() }
+            @Synchronized override fun add(id: String) { prefs.edit { putStringSet(key, all() + id) } }
+            @Synchronized override fun remove(id: String) { prefs.edit { putStringSet(key, all() - id) } }
         }
     }
 
