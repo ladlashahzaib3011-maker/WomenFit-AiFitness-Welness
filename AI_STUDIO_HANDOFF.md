@@ -113,6 +113,10 @@ tables return 404 and the app keeps data locally only (it does not crash).
 8. Don't change the `signingConfigs` block in `app/build.gradle.kts`.
 9. `backend-proxy/` (Node.js) is only a fallback when `SUPABASE_URL` is empty. Its SQL creates
    `public.profiles`, so **never run it against the shared WomenFit database**.
+10. **No Firebase.** The app uses Supabase only (auth + data). The Firebase BOM, `firebase-ai`,
+    Firebase App Check libraries and the Google Services plugin were removed from
+    `build.gradle.kts` / `app/build.gradle.kts`. Do not add them back, and do not add
+    `google-services.json`. Coach Maya uses `BACKEND_PROXY_URL` or its built-in offline mode.
 
 ---
 
